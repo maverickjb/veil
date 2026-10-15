@@ -2,6 +2,7 @@ CROSS   ?= aarch64-linux-gnu-
 CC      := $(CROSS)gcc
 LD      := $(CROSS)ld
 OBJCOPY := $(CROSS)objcopy
+DTC     ?= $(firstword $(wildcard $(CURDIR)/tools/dtc) $(wildcard /usr/bin/dtc) dtc)
 
 # Host SoC (real map) vs guest/ (presented virt machine, not a host).
 PLATFORM ?= qemu-virt
@@ -13,9 +14,9 @@ else
 BOARD := qemu-virt
 endif
 
-# aavmf = QEMU's own ARM UEFI (QEMU_EFI.fd). mini = the tiny virtio BIOS.
+# aavmf = pre-built ARM UEFI in bios/QEMU_EFI.fd. mini = tiny virtio BIOS.
 GUEST ?= aavmf
-EFI_FD ?= /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+EFI_FD ?= bios/QEMU_EFI.fd
 BUILD := build
 
 ifeq ($(GUEST),mini)
@@ -49,6 +50,12 @@ VIRT_SRCS := guest/src/init.c \
 
 HYP_SRCS := $(HYP_CORE) $(BOARD_SRCS) $(VIRT_SRCS)
 HYP_LD := board/$(BOARD)/linker.ld
+DTB_OBJ := $(BUILD)/dtb_blob.o
+ifeq ($(BOARD),qemu-virt)
+DTS_CPPFLAGS := -DVEIL_PCI=1
+else
+DTS_CPPFLAGS :=
+endif
 
 BIOS_SRCS := bios/src/start.S bios/src/main.c
 
@@ -68,10 +75,7 @@ $(BUILD)/bios.bin: $(BUILD)/bios.elf
 $(BUILD)/bios_blob.o: hypervisor/src/bios_blob.S $(BUILD)/bios.bin | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ hypervisor/src/bios_blob.S
 
-$(BUILD)/qemu_efi.fd: $(EFI_FD) | $(BUILD)
-	cp $< $@
-
-$(BUILD)/efi_blob.o: hypervisor/src/efi_blob.S $(BUILD)/qemu_efi.fd | $(BUILD)
+$(BUILD)/efi_blob.o: hypervisor/src/efi_blob.S $(EFI_FD) | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ hypervisor/src/efi_blob.S
 
 $(BUILD)/esp.img: efi/hello.S scripts/mk-testdisk.py | $(BUILD)
@@ -80,9 +84,16 @@ $(BUILD)/esp.img: efi/hello.S scripts/mk-testdisk.py | $(BUILD)
 $(BUILD)/disk_blob.o: hypervisor/src/disk_blob.S $(BUILD)/esp.img | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ hypervisor/src/disk_blob.S
 
-$(BUILD)/veil.elf: $(HYP_SRCS) $(GUEST_OBJ) $(HYP_LD)
+$(BUILD)/guest.dtb: guest/dts/virt.dts | $(BUILD)
+	cpp -nostdinc -undef -P -x assembler-with-cpp $(DTS_CPPFLAGS) $< | \
+		$(DTC) -I dts -O dtb -o $@
+
+$(BUILD)/dtb_blob.o: guest/src/dtb_blob.S $(BUILD)/guest.dtb | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ guest/src/dtb_blob.S
+
+$(BUILD)/veil.elf: $(HYP_SRCS) $(GUEST_OBJ) $(DTB_OBJ) $(HYP_LD)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -T $(HYP_LD) \
-		-o $@ $(HYP_SRCS) $(GUEST_OBJ)
+		-o $@ $(HYP_SRCS) $(GUEST_OBJ) $(DTB_OBJ)
 
 $(BUILD)/veil.bin: $(BUILD)/veil.elf
 	$(OBJCOPY) -O binary $< $@

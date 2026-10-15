@@ -3,5 +3,5 @@
     .global veil_efi_end
     .align  21
 veil_efi_start:
-    .incbin "build/qemu_efi.fd"
+    .incbin "bios/QEMU_EFI.fd"
 veil_efi_end:

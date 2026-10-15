@@ -10,7 +10,8 @@ Host and guest maps are different on purpose.
 board/raspi3    host SoC (UART, mailbox FB, linker)
 board/raspi5    host SoC (BCM2712, real hardware; no QEMU)
 board/qemu-virt default host (QEMU virt + ramfb / virtio-gpu)
-guest/          presented virt machine (virtio-mmio, PL011, GIC, fw_cfg)
+guest/          presented virt machine (dts, virtio-mmio, PL011, GIC, fw_cfg)
+bios/           guest firmware: QEMU_EFI.fd (pre-built) and GUEST=mini
 hypervisor      EL2 core (boot, traps, stage-2)
 ```
 
@@ -23,8 +24,8 @@ HW   Raspberry Pi 3B (BCM2837)     ← RAM at 0x0, UART at 0x3f201000
 ## Stage 1
 
 - Host: QEMU `-M raspi3b`
-- Guest firmware: `/usr/share/qemu-efi-aarch64/QEMU_EFI.fd` (same image
-  `qemu-system-aarch64 -bios` uses on `virt`)
+- Guest firmware: `bios/QEMU_EFI.fd` (pre-built AAVMF, same image QEMU
+  uses with `-bios` on `virt`)
 - Stage-2: `ipa 0x40000000 → pa 0x01000000`, flash at `ipa 0x0`,
   host UART unmapped
 - Emulated for AAVMF: PL011 @ `0x09000000`, GICv3 stub, fw_cfg + DTB,
@@ -34,7 +35,9 @@ The tiny virtio BIOS is still there as `GUEST=mini`.
 
 ## Build and run
 
-Needs `gcc-aarch64-linux-gnu`, `qemu-system-arm`, and `qemu-efi-aarch64`.
+Needs `gcc-aarch64-linux-gnu`, `qemu-system-arm`, and
+`device-tree-compiler` (`dtc`) to build `guest/dts/virt.dts`.
+Guest UEFI is the pre-built `bios/QEMU_EFI.fd`.
 
 ```bash
 make              # GUEST=aavmf PLATFORM=qemu-virt
