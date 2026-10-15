@@ -1,0 +1,8 @@
+# Copy to the Pi 5 boot partition with build/veil.bin.
+# Default firmware looks for kernel_2712.img; either rename the binary
+# or keep this kernel= line.
+
+arm_64bit=1
+enable_uart=1
+uart_2ndstage=1
+kernel=veil.bin
