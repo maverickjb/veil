@@ -83,7 +83,7 @@ These are what AAVMF sees. Host SoC addresses stay unmapped.
 | `0x08080000` | GICv3 ITS | qemu-virt only (MSI for PCI) |
 | `0x09000000` | PL011 UART | guest console; RX/TX bridged to the host UART |
 | `0x09010000` | PL031 RTC | emulated |
-| `0x09020000` | fw_cfg | `etc/fdt`, `etc/ramfb` |
+| `0x09020000` | fw_cfg | `etc/fdt`, `etc/ramfb`, `etc/smbios/*` |
 | `0x0a000000` | virtio-mmio console | id 3 |
 | `0x0a000200` | virtio-mmio block | id 2, embedded testdisk ESP |
 | `0x10000000` | PCI MMIO (32-bit) | qemu-virt only |

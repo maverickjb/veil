@@ -38,3 +38,8 @@ int virt_mmio_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
 void dtb_init(void);
 const uint8_t *dtb_blob(void);
 uint32_t dtb_size(void);
+void smbios_init(void);
+const uint8_t *smbios_tables_blob(void);
+uint32_t smbios_tables_size(void);
+const uint8_t *smbios_anchor_blob(void);
+uint32_t smbios_anchor_size(void);

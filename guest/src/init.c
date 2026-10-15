@@ -5,6 +5,7 @@ void virtio_board_init(void)
 {
     virtio_init();
     dtb_init();
+    smbios_init();
     virt_mmio_init();
 }
 

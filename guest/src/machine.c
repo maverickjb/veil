@@ -34,6 +34,8 @@
 #define FW_CFG_FILE_DIR  0x19
 #define FW_CFG_FILE_FIRST 0x20
 #define FW_CFG_FILE_RAMFB 0x21
+#define FW_CFG_FILE_SMBIOS_TABLES 0x22
+#define FW_CFG_FILE_SMBIOS_ANCHOR 0x23
 #define FW_CFG_DMA_ENABLE (1u << 1)
 
 #define FW_CFG_DMA_ERROR  (1u << 0)
@@ -93,7 +95,7 @@ static uint32_t gicr_isenabler;
 static uint16_t fw_sel;
 static uint32_t fw_off;
 static uint64_t fw_dma;
-static uint8_t file_dir[192];
+static uint8_t file_dir[320];
 static uint32_t file_dir_len;
 static uint8_t ramfb_cfg[28];
 
@@ -144,23 +146,38 @@ static const uint8_t *fw_payload(uint16_t sel, uint32_t *len)
         *len = sizeof(ramfb_cfg);
         return ramfb_cfg;
     }
+    if (sel == FW_CFG_FILE_SMBIOS_TABLES) {
+        *len = smbios_tables_size();
+        return smbios_tables_blob();
+    }
+    if (sel == FW_CFG_FILE_SMBIOS_ANCHOR) {
+        *len = smbios_anchor_size();
+        return smbios_anchor_blob();
+    }
     *len = 0;
     return 0;
+}
+
+static void fw_cfg_add_file(unsigned idx, uint16_t sel, uint32_t size, const char *name)
+{
+    uint8_t *e = file_dir + 4 + idx * 64;
+    put_dir_be32(e, size);
+    e[4] = (uint8_t)(sel >> 8);
+    e[5] = (uint8_t)sel;
+    memcpy(e + 8, name, strlen(name));
 }
 
 static void fw_cfg_build_dir(void)
 {
     memset(file_dir, 0, sizeof(file_dir));
-    put_dir_be32(file_dir, 2); /* count */
-    put_dir_be32(file_dir + 4, dtb_size());
-    file_dir[8] = (uint8_t)(FW_CFG_FILE_FIRST >> 8);
-    file_dir[9] = (uint8_t)FW_CFG_FILE_FIRST;
-    memcpy(file_dir + 12, "etc/fdt", 8);
-    put_dir_be32(file_dir + 68, sizeof(ramfb_cfg));
-    file_dir[72] = (uint8_t)(FW_CFG_FILE_RAMFB >> 8);
-    file_dir[73] = (uint8_t)FW_CFG_FILE_RAMFB;
-    memcpy(file_dir + 76, "etc/ramfb", 10);
-    file_dir_len = 4 + 64 * 2;
+    put_dir_be32(file_dir, 4);
+    fw_cfg_add_file(0, FW_CFG_FILE_FIRST, dtb_size(), "etc/fdt");
+    fw_cfg_add_file(1, FW_CFG_FILE_RAMFB, sizeof(ramfb_cfg), "etc/ramfb");
+    fw_cfg_add_file(2, FW_CFG_FILE_SMBIOS_TABLES, smbios_tables_size(),
+                    "etc/smbios/smbios-tables");
+    fw_cfg_add_file(3, FW_CFG_FILE_SMBIOS_ANCHOR, smbios_anchor_size(),
+                    "etc/smbios/smbios-anchor");
+    file_dir_len = 4 + 64 * 4;
 }
 
 static void *guest_ptr(uint64_t ipa, size_t n)

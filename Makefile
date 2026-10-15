@@ -46,7 +46,8 @@ BOARD_SRCS := board/$(BOARD)/src/board.c \
 VIRT_SRCS := guest/src/init.c \
              guest/src/virtio.c \
              guest/src/machine.c \
-             guest/src/dtb.c
+             guest/src/dtb.c \
+             guest/src/smbios.c
 
 HYP_SRCS := $(HYP_CORE) $(BOARD_SRCS) $(VIRT_SRCS)
 HYP_LD := board/$(BOARD)/linker.ld
