@@ -60,7 +60,7 @@ endif
 
 BIOS_SRCS := bios/src/start.S bios/src/main.c
 
-.PHONY: all clean run test debug ref testdisk
+.PHONY: all clean run test debug ref testdisk disk
 
 all: $(BUILD)/veil.elf $(BUILD)/veil.bin
 
@@ -112,6 +112,12 @@ debug: $(BUILD)/veil.elf $(BUILD)/veil.bin
 $(BUILD)/testdisk.img: $(BUILD)/esp.img
 
 testdisk: $(BUILD)/testdisk.img
+
+# Empty sparse hard disk for AAVMF / an OS install (qemu-img + virtio-blk-pci).
+DISK ?= $(BUILD)/disk.img
+DISK_SIZE ?= 8G
+disk: | $(BUILD)
+	DISK=$(DISK) DISK_SIZE=$(DISK_SIZE) ./scripts/mk-disk.sh
 
 # Stock QEMU virt + AAVMF + testdisk (no Veil)
 ref: $(BUILD)/testdisk.img

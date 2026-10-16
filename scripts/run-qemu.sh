@@ -56,6 +56,17 @@ case "$platform" in
             -serial stdio
             -kernel "$elf"
         )
+        disk="${DISK:-$root/build/disk.img}"
+        if [[ -f "$disk" ]]; then
+            fmt=raw
+            case "$disk" in
+                *.qcow2) fmt=qcow2 ;;
+            esac
+            qemu+=(
+                -drive "if=none,id=hd0,format=${fmt},file=${disk}"
+                -device virtio-blk-pci,drive=hd0
+            )
+        fi
         ;;
     raspi5)
         echo "QEMU has no raspi5 machine. Built for real hardware:" >&2

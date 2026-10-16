@@ -44,6 +44,7 @@ make              # GUEST=aavmf PLATFORM=qemu-virt
 make run          # GTK window = TianoCore / ramfb; Ctrl-A x to quit
 make test
 make testdisk     # GPT + FAT ESP with EFI/BOOT/BOOTAA64.EFI
+make disk         # empty 8G raw image (build/disk.img); DISK_SIZE=16G to change
 make ref          # stock QEMU virt + AAVMF + testdisk (no Veil)
 make debug        # Veil + gdbstub :1234; then: gdb-multiarch -x scripts/gdb-veil.gdb
 
@@ -69,6 +70,16 @@ EFI BOOT\BOOTAA64.EFI
 in the terminal** (not the GTK window) during the splash to open the Boot
 Manager. If you wait, BdsDxe boots the embedded virtio-blk ESP and prints
 **Veil test disk**.
+
+A blank hard disk is the QEMU recipe, not another ESP baked into Veil:
+
+```bash
+make disk                 # qemu-img create -f raw build/disk.img 8G
+# or: qemu-img create -f qcow2 build/disk.qcow2 8G && DISK=build/disk.qcow2 make run
+make run
+```
+
+On `PLATFORM=qemu-virt` that file is `-device virtio-blk-pci`. AAVMF sees it next to the small virtio-mmio testdisk. Leave it empty for an OS installer to partition; `make disk` will not overwrite an existing image. Pi hosts have no PCI passthrough, so this image is not visible there.
 
 ## Guest devices
 
@@ -103,6 +114,7 @@ QEMU attaches these on the host; Veil identity-maps PCI so AAVMF programs them.
 | `ramfb` | scanout / TianoCore GOP |
 | `virtio-gpu-pci` | graphics (same as `make ref`) |
 | `virtio-keyboard-pci` | keyboard (GTK often drops Esc on WSL) |
+| `virtio-blk-pci` | `build/disk.img` when present (`make disk`) |
 | `qemu-xhci` + `usb-kbd` | extra keyboard path |
 | host PL011 (`-serial stdio`) | UEFI serial ConIn/ConOut; **Esc here opens setup** |
 
