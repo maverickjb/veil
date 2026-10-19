@@ -1,0 +1,17 @@
+# dnsmasq fragment for Pi 5 netboot of Veil.
+#   sudo dnsmasq -d -C scripts/dnsmasq-raspi5.conf.example
+# Bind to the NIC that faces the Pi. Do not run two DHCP servers on one LAN.
+
+interface=eth0
+bind-interfaces
+except-interface=lo
+
+dhcp-range=192.168.100.50,192.168.100.80,255.255.255.0,1h
+# Next-server = this host (TFTP).
+dhcp-option=option:tftp-server,192.168.100.1
+dhcp-boot=config.txt
+
+enable-tftp
+tftp-root=/absolute/path/to/veil/build/tftp
+# Some Pi bootloaders ask for /<serial>/config.txt. Either set EEPROM
+# TFTP_PREFIX=0 or restage with SERIAL= and point tftp-root at the parent.

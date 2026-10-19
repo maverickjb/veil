@@ -31,6 +31,7 @@
 static uint64_t l1[1024] __attribute__((aligned(8192)));
 static uint64_t l2_low[512] __attribute__((aligned(4096)));
 static uint64_t l2_ram[512] __attribute__((aligned(4096)));
+static uint64_t l2_ram2[512] __attribute__((aligned(4096)));
 #if BOARD_GIC_PASSTHROUGH
 static uint64_t l2_ecam[512] __attribute__((aligned(4096)));
 static uint64_t l2_pci64[512] __attribute__((aligned(4096)));
@@ -99,6 +100,7 @@ void s2_init(void)
     memset(l1, 0, sizeof(l1));
     memset(l2_low, 0, sizeof(l2_low));
     memset(l2_ram, 0, sizeof(l2_ram));
+    memset(l2_ram2, 0, sizeof(l2_ram2));
 
     if (veil_efi_start) {
         uint64_t flash_pa = (uint64_t)(uintptr_t)veil_efi_start;
@@ -121,8 +123,16 @@ void s2_init(void)
 #endif
 
     l1[ram_l1] = ((uint64_t)l2_ram) | S2_TABLE;
-    for (unsigned i = 0; i < ram_blocks && (ram_first + i) < 512; i++) {
+    unsigned i = 0;
+    for (; i < ram_blocks && (ram_first + i) < 512; i++) {
         l2_ram[ram_first + i] = s2_block(p->guest_ram_pa + ((uint64_t)i * L2_BLOCK));
+    }
+    if (i < ram_blocks) {
+        unsigned n2 = ram_blocks - i;
+        l1[ram_l1 + 1] = ((uint64_t)l2_ram2) | S2_TABLE;
+        for (unsigned j = 0; j < n2 && j < 512; j++) {
+            l2_ram2[j] = s2_block(p->guest_ram_pa + ((uint64_t)(i + j) * L2_BLOCK));
+        }
     }
 
     write_vtcr_el2(VTCR_T0SZ_40 | VTCR_SL0_L1 | VTCR_IRGN0_WB | VTCR_ORGN0_WB |

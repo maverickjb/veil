@@ -260,6 +260,11 @@ void fb_putc(char c)
     fb_glyph(cur_c++, cur_r, c, COL_FG);
 }
 
+int board_skip_testdisk(void)
+{
+    return 0;
+}
+
 int fb_init(void)
 {
     memset(mbox_buf, 0, sizeof(mbox_buf));

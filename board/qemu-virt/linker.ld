@@ -4,7 +4,7 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x5F000000;
+    . = 0xBF000000;
 
     .text : ALIGN(8) {
         *(.text.boot)

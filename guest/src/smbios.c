@@ -121,6 +121,43 @@ void smbios_init(void)
     smbios_str("virt");
     smbios_put(0);
 
+    /* Type 4 Processor Information (GRUB smbios --type 4) */
+    smbios_put(4);
+    smbios_put(0x30);
+    smbios_put16(0x0004);
+    smbios_put(1);    /* socket */
+    smbios_put(0x03); /* CPU */
+    smbios_put(0xfe); /* use Family2 */
+    smbios_put(2);    /* manufacturer */
+    for (i = 0; i < 8; i++) {
+        smbios_put(0);
+    }
+    smbios_put(3); /* version */
+    smbios_put(0);
+    smbios_put16(0);
+    smbios_put16(2000);
+    smbios_put16(2000);
+    smbios_put(0x41); /* populated, enabled */
+    smbios_put(0x06); /* none */
+    smbios_put16(0xffff);
+    smbios_put16(0xffff);
+    smbios_put16(0xffff);
+    smbios_put(0);
+    smbios_put(0);
+    smbios_put(0);
+    smbios_put(1);
+    smbios_put(1);
+    smbios_put(1);
+    smbios_put16(0);
+    smbios_put16(0x011b); /* ARMv8 */
+    smbios_put16(1);
+    smbios_put16(1);
+    smbios_put16(1);
+    smbios_str("CPU0");
+    smbios_str("Veil");
+    smbios_str("ARMv8 Processor");
+    smbios_put(0);
+
     /* Type 16 Physical Memory Array */
     smbios_put(16);
     smbios_put(0x17);

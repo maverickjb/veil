@@ -6,6 +6,11 @@
  * BOARD_MBOX_BASE is in board.h when you port the raspi3 mailbox path.
  */
 
+int board_skip_testdisk(void)
+{
+    return 0;
+}
+
 int fb_init(void)
 {
     return -1;

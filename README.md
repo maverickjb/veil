@@ -50,7 +50,8 @@ make debug        # Veil + gdbstub :1234; then: gdb-multiarch -x scripts/gdb-vei
 
 make GUEST=mini run                 # original tiny virtio BIOS
 make PLATFORM=raspi3 run            # Pi 3 host in QEMU (HDMI text console)
-make PLATFORM=raspi5                # real Pi 5: copy build/veil.bin + board/raspi5/config.txt
+make PLATFORM=raspi5                # real Pi 5 image
+make PLATFORM=raspi5 tftp           # stage build/tftp for netboot
 ```
 
 Expected:
@@ -58,7 +59,7 @@ Expected:
 ```
 veil: el2 hypervisor on qemu-virt (cortex-a76)
 veil: host uart 0x0000000009000000 hidden
-veil: s2 ram ipa 0x0000000040000000 -> pa 0x0000000040000000 (496 MiB)
+veil: s2 ram ipa 0x0000000040000000 -> pa 0x0000000040000000 (2032 MiB)
 veil: AAVMF QEMU_EFI.fd 2048 KiB at ipa 0 pa 0x000000005f400000
 UEFI firmware (version 2024.02-2ubuntu0.8 built at ...)
 BdsDxe: loading Boot0001 "UEFI Misc Device"
@@ -80,6 +81,16 @@ make run
 ```
 
 On `PLATFORM=qemu-virt` that file is `-device virtio-blk-pci`. AAVMF sees it next to the small virtio-mmio testdisk. Leave it empty for an OS installer to partition; `make disk` will not overwrite an existing image. Pi hosts have no PCI passthrough, so this image is not visible there.
+
+To boot an Ubuntu ISO (same QEMU recipe: virtio-scsi CD + virtio-blk target):
+
+```bash
+cp ubuntu-*-arm64.iso build/
+make disk          # 8G target; too small for a full desktop — DISK_SIZE=32G for that
+make run           # picks up build/*.iso, or: make run ISO=build/ubuntu-....iso
+```
+
+`make run` hides the testdisk ESP so AAVMF boots `UEFI QEMU QEMU CD-ROM`. GRUB’s “Try or Install Ubuntu Server” auto-starts after 30s. The installer TUI is on the **GTK window** (`console=tty0`); the terminal is still for Esc / serial.
 
 ## Guest devices
 
@@ -115,6 +126,8 @@ QEMU attaches these on the host; Veil identity-maps PCI so AAVMF programs them.
 | `virtio-gpu-pci` | graphics (same as `make ref`) |
 | `virtio-keyboard-pci` | keyboard (GTK often drops Esc on WSL) |
 | `virtio-blk-pci` | `build/disk.img` when present (`make disk`) |
+| `virtio-scsi-pci` + `scsi-cd` | `build/*.iso` on interactive `make run` |
+| `virtio-net-pci` | user NAT, only with an ISO |
 | `qemu-xhci` + `usb-kbd` | extra keyboard path |
 | host PL011 (`-serial stdio`) | UEFI serial ConIn/ConOut; **Esc here opens setup** |
 
@@ -124,4 +137,17 @@ QEMU attaches these on the host; Veil identity-maps PCI so AAVMF programs them.
 |------------|-------|------------|
 | `qemu-virt` (default) | QEMU `virt` + virtualization | `make run` |
 | `raspi3` | BCM2837, QEMU `raspi3b` | `make PLATFORM=raspi3 run` |
-| `raspi5` | BCM2712, real hardware only | `make PLATFORM=raspi5` then copy `build/veil.bin` |
+| `raspi5` | BCM2712, real hardware only | SD: copy `veil.bin` + `config.txt`, or `make PLATFORM=raspi5 tftp` |
+
+### Raspberry Pi 5 TFTP
+
+`QEMU_EFI.fd` is not a TFTP file. It is linked into `veil.bin`.
+
+```bash
+make PLATFORM=raspi5 tftp          # fills build/tftp/
+# SERIAL=abcd1234 make PLATFORM=raspi5 tftp   # if EEPROM TFTP_PREFIX=1
+```
+
+On the Pi, set EEPROM `BOOT_ORDER` to include network (`0xf21` or `0xf2`) and `TFTP_IP` to the server. Serve `build/tftp` with dnsmasq (`scripts/dnsmasq-raspi5.conf.example`). Also copy `bcm2712-rpi-5-b.dtb` from a Pi OS boot partition if the script cannot find one. UART is the JST-SH header next to USB-C, 115200 8n1.
+
+Guest PXE (AAVMF “PXE over IPv4”) is a different path: it needs a virt NIC, which exists on `PLATFORM=qemu-virt` only.

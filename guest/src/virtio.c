@@ -533,7 +533,8 @@ void virtio_init(void)
     }
 
     block.base = VEIL_VIRTIO_BLK_IPA;
-    if (veil_disk_start && (uintptr_t)veil_disk_end > (uintptr_t)veil_disk_start) {
+    if (!board_skip_testdisk() && veil_disk_start &&
+        (uintptr_t)veil_disk_end > (uintptr_t)veil_disk_start) {
         block.disk = (uint8_t *)veil_disk_start;
         block.disk_size = (size_t)((uintptr_t)veil_disk_end - (uintptr_t)veil_disk_start);
         block.capacity = block.disk_size / 512ull;

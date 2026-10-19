@@ -329,6 +329,34 @@ void fb_putc(char c)
     fb_glyph(cur_c++, cur_r, c, COL_FG);
 }
 
+int board_skip_testdisk(void)
+{
+    static const char want[] = "opt/org.veil/skip-testdisk";
+    uint8_t hdr[4];
+    uint32_t n;
+    uint32_t i;
+    uint32_t b;
+
+    fw_sel(FW_CFG_FILE_DIR);
+    for (b = 0; b < 4; b++) {
+        hdr[b] = fw_in8();
+    }
+    n = rd_be32(hdr);
+    if (n == 0 || n > 64) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        uint8_t ent[64];
+        for (b = 0; b < 64; b++) {
+            ent[b] = fw_in8();
+        }
+        if (memcmp(ent + 8, want, sizeof(want)) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int fb_init(void)
 {
     uint16_t sel;

@@ -60,7 +60,7 @@ endif
 
 BIOS_SRCS := bios/src/start.S bios/src/main.c
 
-.PHONY: all clean run test debug ref testdisk disk
+.PHONY: all clean run test debug ref testdisk disk tftp
 
 all: $(BUILD)/veil.elf $(BUILD)/veil.bin
 
@@ -92,15 +92,16 @@ $(BUILD)/guest.dtb: guest/dts/virt.dts | $(BUILD)
 $(BUILD)/dtb_blob.o: guest/src/dtb_blob.S $(BUILD)/guest.dtb | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ guest/src/dtb_blob.S
 
-$(BUILD)/veil.elf: $(HYP_SRCS) $(GUEST_OBJ) $(DTB_OBJ) $(HYP_LD)
+$(BUILD)/veil.elf: $(HYP_SRCS) $(GUEST_OBJ) $(DTB_OBJ) $(HYP_LD) | $(BUILD)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -T $(HYP_LD) \
 		-o $@ $(HYP_SRCS) $(GUEST_OBJ) $(DTB_OBJ)
 
 $(BUILD)/veil.bin: $(BUILD)/veil.elf
 	$(OBJCOPY) -O binary $< $@
 
+ISO ?=
 run: $(BUILD)/veil.elf $(BUILD)/veil.bin
-	PLATFORM=$(PLATFORM) GUEST=$(GUEST) ./scripts/run-qemu.sh
+	PLATFORM=$(PLATFORM) GUEST=$(GUEST) ISO="$(ISO)" DISK="$(DISK)" ./scripts/run-qemu.sh
 
 test: $(BUILD)/veil.elf $(BUILD)/veil.bin
 	PLATFORM=$(PLATFORM) GUEST=$(GUEST) ./scripts/run-qemu.sh --test
@@ -118,6 +119,14 @@ DISK ?= $(BUILD)/disk.img
 DISK_SIZE ?= 8G
 disk: | $(BUILD)
 	DISK=$(DISK) DISK_SIZE=$(DISK_SIZE) ./scripts/mk-disk.sh
+
+# Pi 5 TFTP root (veil.bin already contains QEMU_EFI.fd).
+TFTP_ROOT ?= $(BUILD)/tftp
+tftp: $(BUILD)/veil.bin
+ifneq ($(BOARD),raspi5)
+	$(error TFTP deploy is Pi 5 only; use: make PLATFORM=raspi5 tftp)
+endif
+	TFTP_ROOT=$(TFTP_ROOT) BIN=$(BUILD)/veil.bin ./scripts/mk-tftp-raspi5.sh
 
 # Stock QEMU virt + AAVMF + testdisk (no Veil)
 ref: $(BUILD)/testdisk.img

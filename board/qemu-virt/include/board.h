@@ -10,9 +10,9 @@
 
 #define BOARD_UART_BASE 0x09000000ull
 #define BOARD_RAM_PA    0x40000000ull
-#define BOARD_RAM_SIZE  (512ull * 1024ull * 1024ull)
+#define BOARD_RAM_SIZE  (2048ull * 1024ull * 1024ull)
 /* Hyp at the top of RAM so guest IPA 0x40000000 is identity — PCI DMA works. */
-#define BOARD_HYP_PA    0x5F000000ull
+#define BOARD_HYP_PA    0xBF000000ull
 #define BOARD_HYP_SIZE  0x01000000ull
 #define BOARD_GUEST_PA  0x40000000ull
 #define BOARD_NAME      "qemu-virt"
@@ -40,3 +40,4 @@ void uart_puts(const char *s);
 int fb_init(void);
 void fb_putc(char c);
 int fb_map_guest_ramfb(const uint8_t *be_cfg, uint32_t len);
+int board_skip_testdisk(void);
