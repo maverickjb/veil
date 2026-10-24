@@ -45,6 +45,14 @@ void uart_init(void)
     (void)uart_reg(PL011_DR);
 }
 
+void board_mask_host_irqs(void)
+{
+}
+
+void board_ack_host_irq(void)
+{
+}
+
 void uart_putc(char c)
 {
     if (c == '\n') {

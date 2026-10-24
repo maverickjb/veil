@@ -64,6 +64,119 @@ static void s2_map_dev(uint64_t *l2, uint64_t ipa, uint64_t size)
 }
 #endif
 
+static uint64_t load_pa64(uint64_t pa)
+{
+    /* Pull guest-cacheable PTEs/insns to DRAM, then read without EL2 MMU. */
+    __asm__ volatile("dc civac, %0" ::"r"(pa) : "memory");
+    dsb_sy();
+    return *(volatile uint64_t *)(uintptr_t)pa;
+}
+
+static uint32_t load_pa32(uint64_t pa)
+{
+    __asm__ volatile("dc civac, %0" ::"r"(pa) : "memory");
+    dsb_sy();
+    return *(volatile uint32_t *)(uintptr_t)pa;
+}
+
+int guest_va_to_pa(uint64_t va, uint64_t *pa)
+{
+    uint64_t sctlr = read_sctlr_el1();
+    uint64_t ipa;
+    uint64_t table_ipa;
+    unsigned t0sz;
+    unsigned ia_bits;
+    int level;
+
+    if (!(sctlr & 1ull)) {
+        return s2_ipa_to_pa(va, pa, 0);
+    }
+
+    t0sz = (unsigned)(read_tcr_el1() & 63ull);
+    if (t0sz < 16u) {
+        t0sz = 16u;
+    }
+    if (t0sz > 39u) {
+        t0sz = 39u;
+    }
+    ia_bits = 64u - t0sz;
+    if ((read_tcr_el1() >> 14) & 3ull) {
+        /* Guest is 4K only; AAVMF uses 4K. */
+        return -1;
+    }
+
+    if (ia_bits > 39u) {
+        level = 0;
+    } else if (ia_bits > 30u) {
+        level = 1;
+    } else if (ia_bits > 21u) {
+        level = 2;
+    } else {
+        level = 3;
+    }
+
+    table_ipa = read_ttbr0_el1() & 0x0000fffffffff000ull;
+
+    for (; level <= 3; level++) {
+        unsigned shift = 12u + 9u * (3u - (unsigned)level);
+        unsigned idx = (unsigned)((va >> shift) & 0x1ffull);
+        uint64_t desc_pa;
+        uint64_t desc;
+        uint64_t mask;
+
+        if (s2_ipa_to_pa(table_ipa + (uint64_t)idx * 8ull, &desc_pa, 0) != 0) {
+            return -1;
+        }
+        desc = load_pa64(desc_pa);
+        if ((desc & 1ull) == 0) {
+            return -1;
+        }
+        if (level < 3 && (desc & 2ull) == 0) {
+            mask = (1ull << shift) - 1ull;
+            ipa = (desc & 0x0000fffffffff000ull & ~mask) | (va & mask);
+            return s2_ipa_to_pa(ipa, pa, 0);
+        }
+        if (level == 3) {
+            ipa = (desc & 0x0000fffffffff000ull) | (va & 0xfffull);
+            return s2_ipa_to_pa(ipa, pa, 0);
+        }
+        table_ipa = desc & 0x0000fffffffff000ull;
+    }
+    return -1;
+}
+
+uint32_t guest_fetch_insn(uint64_t va)
+{
+    uint64_t pa;
+    if (guest_va_to_pa(va, &pa) != 0) {
+        return 0;
+    }
+    return load_pa32(pa);
+}
+
+void guest_mem_sync(uint64_t pa, size_t n)
+{
+    uint64_t ctr;
+    uint64_t line;
+    uint64_t a;
+    uint64_t end;
+
+    if (!n) {
+        return;
+    }
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    line = 4ull << ((ctr >> 16) & 0xfull);
+    if (line < 16ull || line > 256ull) {
+        line = 64ull;
+    }
+    a = pa & ~(line - 1ull);
+    end = pa + n;
+    for (; a < end; a += line) {
+        __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
+    }
+    dsb_sy();
+}
+
 int s2_ipa_to_pa(uint64_t ipa, uint64_t *pa, size_t *remain)
 {
     const struct platform *p = platform_get();

@@ -86,7 +86,15 @@ static void *ipa_ptr(uint64_t ipa, size_t need)
     if (s2_ipa_to_pa(ipa, &pa, &remain) || remain < need) {
         return 0;
     }
+    guest_mem_sync(pa, need);
     return (void *)(uintptr_t)pa;
+}
+
+static void ipa_done(void *p, size_t n)
+{
+    if (p && n) {
+        guest_mem_sync((uint64_t)(uintptr_t)p, n);
+    }
 }
 
 static void virtq_reset(struct virtq *q)
@@ -167,6 +175,7 @@ static void process_tx(struct virtq *q)
         used->ring[uslot].len = written;
         dsb_sy();
         used->idx++;
+        ipa_done(used, 4 + 8 * q->num);
         q->last_avail++;
         console.int_status |= 1u;
         virtio_pend_spi(16);
@@ -238,6 +247,7 @@ static int xfer_data(struct virtq_desc *desc, uint16_t n, uint16_t id, uint32_t 
                     memcpy(disk + disk_off + done, buf + from, ncopy);
                 } else {
                     memcpy(buf + from, disk + disk_off + done, ncopy);
+                    ipa_done(buf, d->len);
                 }
                 done += ncopy;
             }
@@ -278,6 +288,7 @@ static int write_status(struct virtq_desc *desc, uint16_t n, uint16_t id, uint8_
         return -1;
     }
     *p = st;
+    ipa_done(p, 1);
     return 0;
 }
 
@@ -347,6 +358,7 @@ static void process_blk(struct virtq *q)
         used->ring[uslot].len = written;
         dsb_sy();
         used->idx++;
+        ipa_done(used, 4 + 8 * q->num);
         q->last_avail++;
         block.int_status |= 1u;
         virtio_pend_spi(17);

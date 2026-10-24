@@ -19,6 +19,7 @@
 #define BOARD_CPU       "cortex-a76"
 /* Host GICv3 sits at the virt map; pass it through so AAVMF matches make ref. */
 #define BOARD_GIC_PASSTHROUGH 1
+#define BOARD_GUEST_RAMFB 1
 
 struct platform {
     const char *name;
@@ -35,6 +36,8 @@ struct platform {
 const struct platform *platform_get(void);
 void platform_clip_guest_ram(uint64_t pa, size_t n);
 void uart_init(void);
+void board_mask_host_irqs(void);
+void board_ack_host_irq(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
 int fb_init(void);

@@ -88,7 +88,7 @@ static unsigned pl011_rx_r, pl011_rx_w, pl011_rx_n;
 
 static uint32_t gicd_ctlr;
 static uint32_t gicd_isenabler[8];
-static uint32_t gicr_waker;
+static uint32_t gicr_waker = 0x6; /* ProcessorSleep | ChildrenAsleep */
 static uint32_t gicr_ctlr;
 static uint32_t gicr_isenabler;
 
@@ -169,15 +169,19 @@ static void fw_cfg_add_file(unsigned idx, uint16_t sel, uint32_t size, const cha
 
 static void fw_cfg_build_dir(void)
 {
+    unsigned n = 0;
+
     memset(file_dir, 0, sizeof(file_dir));
-    put_dir_be32(file_dir, 4);
-    fw_cfg_add_file(0, FW_CFG_FILE_FIRST, dtb_size(), "etc/fdt");
-    fw_cfg_add_file(1, FW_CFG_FILE_RAMFB, sizeof(ramfb_cfg), "etc/ramfb");
-    fw_cfg_add_file(2, FW_CFG_FILE_SMBIOS_TABLES, smbios_tables_size(),
+    fw_cfg_add_file(n++, FW_CFG_FILE_FIRST, dtb_size(), "etc/fdt");
+#if BOARD_GUEST_RAMFB
+    fw_cfg_add_file(n++, FW_CFG_FILE_RAMFB, sizeof(ramfb_cfg), "etc/ramfb");
+#endif
+    fw_cfg_add_file(n++, FW_CFG_FILE_SMBIOS_TABLES, smbios_tables_size(),
                     "etc/smbios/smbios-tables");
-    fw_cfg_add_file(3, FW_CFG_FILE_SMBIOS_ANCHOR, smbios_anchor_size(),
+    fw_cfg_add_file(n++, FW_CFG_FILE_SMBIOS_ANCHOR, smbios_anchor_size(),
                     "etc/smbios/smbios-anchor");
-    file_dir_len = 4 + 64 * 4;
+    put_dir_be32(file_dir, n);
+    file_dir_len = 4 + 64 * n;
 }
 
 static void *guest_ptr(uint64_t ipa, size_t n)
@@ -187,6 +191,8 @@ static void *guest_ptr(uint64_t ipa, size_t n)
     if (s2_ipa_to_pa(ipa, &pa, &remain) || remain < n) {
         return 0;
     }
+    /* Guest DRAM is cacheable; EL2 must see/commit through PoC. */
+    guest_mem_sync(pa, n);
     return (void *)(uintptr_t)pa;
 }
 
@@ -199,12 +205,19 @@ static void fw_dma_run(void)
     } acc;
     void *p = guest_ptr(fw_dma, sizeof(acc));
     if (!p) {
+        hyp_printf("veil: fw_cfg dma desc ipa=%p unreachable\n", fw_dma);
         return;
     }
     memcpy(&acc, p, sizeof(acc));
     uint32_t ctrl = be32(acc.control);
     uint32_t len = be32(acc.length);
     uint64_t addr = be64(acc.address);
+    static int dma_log;
+
+    if (!dma_log) {
+        dma_log = 1;
+        hyp_printf("veil: fw_cfg dma ctrl=0x%x len=%u addr=%p\n", ctrl, len, addr);
+    }
 
     if (ctrl & FW_CFG_DMA_SELECT) {
         fw_sel = (uint16_t)(ctrl >> 16);
@@ -220,6 +233,7 @@ static void fw_dma_run(void)
         void *dst = guest_ptr(addr, n);
         if (dst && pay) {
             memcpy(dst, pay + fw_off, n);
+            guest_mem_sync((uint64_t)(uintptr_t)dst, n);
         } else if (len && !dst) {
             ctrl |= FW_CFG_DMA_ERROR;
         }
@@ -252,6 +266,7 @@ static void fw_dma_run(void)
 
     acc.control = be32(ctrl & FW_CFG_DMA_ERROR);
     memcpy(p, &acc, sizeof(acc));
+    guest_mem_sync((uint64_t)(uintptr_t)p, sizeof(acc));
     fw_dma = 0;
 }
 
@@ -435,10 +450,26 @@ static void pl031_write(uint64_t off, uint64_t val)
     }
 }
 
+static uint64_t gicr_affinity(void)
+{
+    uint64_t m = read_mpidr_el1();
+
+    return (m & 0xffull) |
+           (((m >> 8) & 0xffull) << 8) |
+           (((m >> 16) & 0xffull) << 16) |
+           (((m >> 32) & 0xffull) << 24);
+}
+
+static uint64_t gicr_typer_val(void)
+{
+    /* Last redistributor; affinity must match this CPU's MPIDR. */
+    return (gicr_affinity() << 32) | (1ull << 4);
+}
+
 static uint64_t gicd_read(uint64_t off)
 {
     if (off == GICD_CTLR) {
-        return gicd_ctlr;
+        return gicd_ctlr & ~(1u << 31); /* RWP is RO and never busy */
     }
     if (off == GICD_TYPER) {
         /* 256 SPIs, IDBits=16, A3V, no LPIs. Close to QEMU virt GICv3. */
@@ -460,7 +491,7 @@ static uint64_t gicd_read(uint64_t off)
 static void gicd_write(uint64_t off, uint64_t val)
 {
     if (off == GICD_CTLR) {
-        gicd_ctlr = (uint32_t)val;
+        gicd_ctlr = (uint32_t)val & ~(1u << 31);
         return;
     }
     if (off >= 0x100 && off < 0x180) {
@@ -481,14 +512,14 @@ static void gicd_write(uint64_t off, uint64_t val)
 static uint64_t gicr_read(uint64_t off, unsigned size)
 {
     if (off == GICR_CTLR) {
-        return gicr_ctlr;
+        return gicr_ctlr & ~(1u << 3); /* RWP */
     }
     if (off == GICR_TYPER) {
-        uint64_t typer = (1ull << 4); /* Last, affinity 0 */
+        uint64_t typer = gicr_typer_val();
         return (size == 8) ? typer : (uint32_t)typer;
     }
     if (off == GICR_TYPER + 4) {
-        return 0;
+        return (uint32_t)(gicr_typer_val() >> 32);
     }
     if (off == GICR_WAKER) {
         return gicr_waker;
@@ -505,11 +536,15 @@ static uint64_t gicr_read(uint64_t off, unsigned size)
 static void gicr_write(uint64_t off, uint64_t val)
 {
     if (off == GICR_CTLR) {
-        gicr_ctlr = (uint32_t)val;
+        gicr_ctlr = (uint32_t)val & ~(1u << 3);
     }
     if (off == GICR_WAKER) {
-        /* Clearing ProcessorSleep also clears ChildrenAsleep. */
-        gicr_waker = (uint32_t)val & ~0x6u;
+        /* QEMU: ProcessorSleep=1 keeps ChildrenAsleep; clearing PS wakes. */
+        if ((uint32_t)val & 0x2u) {
+            gicr_waker = 0x6u;
+        } else {
+            gicr_waker = 0;
+        }
     }
     if (off == GICR_SGI + 0x100) {
         gicr_isenabler |= (uint32_t)val;
@@ -802,8 +837,8 @@ int virt_mmio_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data)
         }
         return 0;
     }
-    if (ipa >= VEIL_GICR_IPA && ipa < VEIL_GICR_IPA + VEIL_GICR_SIZE) {
-        uint64_t off = ipa - VEIL_GICR_IPA;
+    if (ipa >= VEIL_GICR_IPA && ipa < VEIL_GICR_IPA + VEIL_GICR_DTB_SIZE) {
+        uint64_t off = (ipa - VEIL_GICR_IPA) % VEIL_GICR_SIZE;
         if (is_write) {
             gicr_write(off, *data);
         } else {
@@ -992,13 +1027,19 @@ void guest_vbar_hook(void)
     uint64_t pa = 0;
     uint32_t *p;
 
-    if (vbar < VEIL_GUEST_RAM_IPA || vbar == hooked_vbar) {
+    if (vbar == hooked_vbar) {
         return;
     }
-    if (s2_ipa_to_pa(vbar + 0x200, &pa, 0) != 0) {
+    /* VBAR=0 is flash padding; patching it corrupts QEMU_EFI.fd at 0x200. */
+    if (vbar < VEIL_GUEST_RAM_IPA) {
+        return;
+    }
+    if (guest_va_to_pa(vbar + 0x200, &pa) != 0) {
         return;
     }
     p = (uint32_t *)(uintptr_t)pa;
+    __asm__ volatile("dc civac, %0" ::"r"(p) : "memory");
+    dsb_sy();
     if (*p == HVC_ICC_INSN) {
         hooked_vbar = vbar;
         hooked_vec_pa = pa;
@@ -1007,6 +1048,7 @@ void guest_vbar_hook(void)
     saved_vec_insn = *p;
     *p = HVC_ICC_INSN;
     dsb_sy();
+    __asm__ volatile("dc cvau, %0" ::"r"(p) : "memory");
     __asm__ volatile("ic ialluis" ::: "memory");
     dsb_ish();
     isb();
@@ -1019,18 +1061,18 @@ int guest_el1_sync_from_hvc(struct trapframe *tf)
     uint64_t esr1 = read_esr_el1();
     uint64_t elr1 = read_elr_el1();
     uint32_t ec1 = (uint32_t)((esr1 >> ESR_EC_SHIFT) & ESR_EC_MASK);
-    uint64_t pa = 0;
     uint32_t insn = 0;
 
-    if (ec1 == 0 && s2_ipa_to_pa(elr1, &pa, 0) == 0) {
-        insn = *(volatile uint32_t *)(uintptr_t)pa;
-        if (icc_emulate(tf, insn) == 0) {
+    if (ec1 == 0) {
+        insn = guest_fetch_insn(elr1);
+        if (insn && icc_emulate(tf, insn) == 0) {
             tf->elr = elr1 + 4;
             tf->spsr = read_spsr_el1();
             return 0;
         }
-        hyp_printf("veil: el1 undef insn=0x%x elr=%p esr=0x%lx\n",
-                   insn, elr1, (unsigned long)esr1);
+        hyp_printf("veil: el1 undef insn=0x%x elr=%p esr=0x%lx sctlr=0x%lx\n",
+                   insn, elr1, (unsigned long)esr1,
+                   (unsigned long)read_sctlr_el1());
     }
 
     if (hooked_vec_pa && saved_vec_insn) {

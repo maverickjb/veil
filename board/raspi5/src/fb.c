@@ -8,7 +8,8 @@
 
 int board_skip_testdisk(void)
 {
-    return 0;
+    /* No embedded ESP: BDS stays on the serial Boot Manager. */
+    return 1;
 }
 
 int fb_init(void)

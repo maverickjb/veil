@@ -49,6 +49,14 @@ void platform_clip_guest_ram(uint64_t pa, size_t n)
     }
 }
 
+void board_mask_host_irqs(void)
+{
+}
+
+void board_ack_host_irq(void)
+{
+}
+
 void uart_init(void)
 {
     *uart_reg(PL011_CR) = 0;

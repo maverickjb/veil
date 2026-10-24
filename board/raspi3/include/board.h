@@ -17,6 +17,7 @@
 #define BOARD_NAME      "raspi3"
 #define BOARD_CPU       "bcm2837 cortex-a53"
 #define BOARD_GIC_PASSTHROUGH 0
+#define BOARD_GUEST_RAMFB 0
 
 struct platform {
     const char *name;
@@ -33,6 +34,8 @@ struct platform {
 const struct platform *platform_get(void);
 void platform_clip_guest_ram(uint64_t pa, size_t n);
 void uart_init(void);
+void board_mask_host_irqs(void);
+void board_ack_host_irq(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
 int fb_init(void);

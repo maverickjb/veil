@@ -78,6 +78,7 @@ el2_vectors:
 
 el1_irq:
     save_regs
+    bl      board_ack_host_irq
     bl      veil_timer_poll
     restore_regs
     eret
