@@ -260,6 +260,10 @@ void fb_putc(char c)
     fb_glyph(cur_c++, cur_r, c, COL_FG);
 }
 
+void fb_selftest(void)
+{
+}
+
 int board_skip_testdisk(void)
 {
     return 0;

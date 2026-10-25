@@ -7,3 +7,9 @@ arm_64bit=1
 enable_uart=1
 uart_2ndstage=1
 kernel=veil.bin
+
+# Mailbox HDMI framebuffer (rpi5-uefi / DisplayDxe style).
+framebuffer_depth=32
+disable_overscan=1
+# If HDMI stays black on this board, try: framebuffer_depth=24
+# Optional DMT timings: hdmi_group=2  then hdmi_mode=4/9/16 (640/800/1024).

@@ -328,6 +328,7 @@ void veil_main(void)
     hyp_printf("veil: cntfrq %u Hz\n", (unsigned)read_cntfrq_el0());
     if (fb_init() == 0) {
         hyp_printf("veil: host framebuffer ready\n");
+        fb_selftest();
     } else {
         hyp_printf("veil: no host framebuffer (serial only)\n");
     }

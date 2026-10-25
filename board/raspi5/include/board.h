@@ -43,6 +43,8 @@ void board_ack_host_irq(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
 int fb_init(void);
+int fb_set_mode(unsigned width, unsigned height);
+void fb_selftest(void);
 void fb_putc(char c);
 int fb_map_guest_ramfb(const uint8_t *be_cfg, uint32_t len);
 int board_skip_testdisk(void);

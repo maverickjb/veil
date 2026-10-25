@@ -357,6 +357,10 @@ int board_skip_testdisk(void)
     return 0;
 }
 
+void fb_selftest(void)
+{
+}
+
 int fb_init(void)
 {
     uint16_t sel;
