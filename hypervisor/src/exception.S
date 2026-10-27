@@ -62,7 +62,7 @@ el2_vectors:
     ventry  hang
 
     ventry  el2_sync_curr
-    ventry  hang
+    ventry  el2_irq
     ventry  hang
     ventry  hang
 
@@ -79,7 +79,16 @@ el2_vectors:
 el1_irq:
     save_regs
     bl      board_ack_host_irq
-    bl      veil_timer_poll
+    mov     x0, sp
+    bl      veil_timer_poll_tf
+    restore_regs
+    eret
+
+el2_irq:
+    save_regs
+    bl      board_ack_host_irq
+    mov     x0, sp
+    bl      veil_timer_poll_tf
     restore_regs
     eret
 

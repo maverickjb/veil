@@ -16,6 +16,11 @@
 #define PL011_RIS  0x3c
 #define PL011_MIS  0x40
 #define PL011_ICR  0x44
+#define PL011_RXIM (1u << 4)
+#define PL011_RTIM (1u << 6)
+#define PL011_RXIS (1u << 4)
+#define PL011_RTIS (1u << 6)
+#define VEIL_UART_INTID 33u /* GIC SPI 1, virt.dts interrupts = <0 1 4> */
 
 #define GICD_CTLR  0x000
 #define GICD_TYPER 0x004
@@ -83,8 +88,10 @@ static uint32_t pl011_ibrd = 1;
 static uint32_t pl011_fbrd;
 static uint32_t pl011_lcrh = 0x70;
 static uint32_t pl011_imsc;
+static uint32_t pl011_ris;
 static uint8_t pl011_rx[32];
 static unsigned pl011_rx_r, pl011_rx_w, pl011_rx_n;
+static int pl011_irq;
 
 static uint32_t gicd_ctlr;
 static uint32_t gicd_isenabler[8];
@@ -243,17 +250,27 @@ static void fw_dma_run(void)
         if (!src) {
             ctrl |= FW_CFG_DMA_ERROR;
         } else if (fw_sel == FW_CFG_FILE_RAMFB) {
-            uint32_t w = len;
             hyp_printf("veil: ramfb dma write off=%u len=%u\n", fw_off, len);
-            if (fw_off + w > sizeof(ramfb_cfg)) {
-                w = (fw_off < sizeof(ramfb_cfg)) ? (uint32_t)(sizeof(ramfb_cfg) - fw_off) : 0;
-            }
-            if (w) {
-                memcpy(ramfb_cfg + fw_off, src, w);
-                fw_off += w;
-                if (fw_off >= sizeof(ramfb_cfg)) {
-                    if (fb_map_guest_ramfb(ramfb_cfg, sizeof(ramfb_cfg)) != 0) {
-                        hyp_printf("veil: guest ramfb map failed\n");
+            if (len >= sizeof(ramfb_cfg)) {
+                memcpy(ramfb_cfg, src, sizeof(ramfb_cfg));
+                fw_off = sizeof(ramfb_cfg);
+                if (fb_map_guest_ramfb(ramfb_cfg, sizeof(ramfb_cfg)) != 0) {
+                    hyp_printf("veil: guest ramfb map failed\n");
+                }
+            } else {
+                uint32_t w = len;
+                if (fw_off + w > sizeof(ramfb_cfg)) {
+                    w = (fw_off < sizeof(ramfb_cfg))
+                            ? (uint32_t)(sizeof(ramfb_cfg) - fw_off)
+                            : 0;
+                }
+                if (w) {
+                    memcpy(ramfb_cfg + fw_off, src, w);
+                    fw_off += w;
+                    if (fw_off >= sizeof(ramfb_cfg)) {
+                        if (fb_map_guest_ramfb(ramfb_cfg, sizeof(ramfb_cfg)) != 0) {
+                            hyp_printf("veil: guest ramfb map failed\n");
+                        }
                     }
                 }
             }
@@ -280,6 +297,16 @@ static void pl011_rx_push(uint8_t b)
     pl011_rx_n++;
 }
 
+static void pl011_update_irq(void)
+{
+    if (pl011_rx_n) {
+        pl011_ris |= PL011_RXIS | PL011_RTIS;
+    } else {
+        pl011_ris &= ~(PL011_RXIS | PL011_RTIS);
+    }
+    pl011_irq = (pl011_imsc & pl011_ris) != 0;
+}
+
 /* Host UART RX → guest PL011. GTK often drops Esc; the QEMU serial window does not. */
 static void pl011_pull_host(void)
 {
@@ -287,11 +314,15 @@ static void pl011_pull_host(void)
     volatile uint32_t *dr = (volatile uint32_t *)(BOARD_UART_BASE + PL011_DR);
     unsigned n = 0;
 
-    while (pl011_rx_n < sizeof(pl011_rx) && n++ < 16u) {
+    while (pl011_rx_n < sizeof(pl011_rx) && n++ < 32u) {
         if (*fr & PL011_FR_RXFE) {
             break;
         }
         pl011_rx_push((uint8_t)*dr);
+    }
+    pl011_update_irq();
+    if (n) {
+        fb_ramfb_present();
     }
 }
 
@@ -307,6 +338,7 @@ static uint64_t pl011_read(uint64_t off)
             uint8_t b = pl011_rx[pl011_rx_r];
             pl011_rx_r = (pl011_rx_r + 1u) % (unsigned)sizeof(pl011_rx);
             pl011_rx_n--;
+            pl011_update_irq();
             return b;
         }
     case PL011_FR:
@@ -322,8 +354,9 @@ static uint64_t pl011_read(uint64_t off)
     case PL011_IMSC:
         return pl011_imsc;
     case PL011_RIS:
+        return pl011_ris;
     case PL011_MIS:
-        return 0;
+        return pl011_imsc & pl011_ris;
     case 0xfe0:
         return 0x11;
     case 0xfe4:
@@ -353,6 +386,7 @@ static void pl011_write(uint64_t off, uint64_t val)
         static const char *want = "Synchronous Exception";
         static int match;
         uart_putc(c);
+        fb_ramfb_present();
         if (c == want[match]) {
             match++;
             if (want[match] == 0) {
@@ -378,6 +412,11 @@ static void pl011_write(uint64_t off, uint64_t val)
         break;
     case PL011_IMSC:
         pl011_imsc = (uint32_t)val;
+        pl011_update_irq();
+        break;
+    case PL011_ICR:
+        pl011_ris &= ~(uint32_t)val;
+        pl011_update_irq();
         break;
     default:
         break;
@@ -481,6 +520,9 @@ static uint64_t gicd_read(uint64_t off)
     if (off == GICD_PIDR2) {
         return 0x30u;
     }
+    if (off >= 0x080 && off < 0x100) {
+        return 0xffffffffu; /* IGROUPR: Group-1 NS */
+    }
     if (off >= 0x100 && off < 0x180) {
         unsigned n = (unsigned)((off - 0x100) / 4);
         return (n < 8) ? gicd_isenabler[n] : 0;
@@ -524,8 +566,23 @@ static uint64_t gicr_read(uint64_t off, unsigned size)
     if (off == GICR_WAKER) {
         return gicr_waker;
     }
+    if (off == GICR_SGI + 0x80) {
+        return 0xffffffffu; /* IGROUPR0: PPIs/SGIs Group-1 NS */
+    }
     if (off == GICR_SGI + 0x100) {
         return gicr_isenabler;
+    }
+    if (off == GICR_SGI + 0x200) {
+        uint64_t vctl = read_cntv_ctl_el0();
+        uint64_t pctl = read_cntp_ctl_el0();
+        uint32_t pend = 0;
+        if ((vctl & 5u) == 5u && !(vctl & 2u)) {
+            pend |= (1u << 27);
+        }
+        if ((pctl & 5u) == 5u && !(pctl & 2u)) {
+            pend |= (1u << 30);
+        }
+        return pend;
     }
     if (off == GICR_PIDR2 || off == GICR_SGI + GICR_PIDR2) {
         return 0x30u;
@@ -888,52 +945,233 @@ static uint32_t icc_igrpen1;
 static uint32_t timer_intid;
 static uint64_t hooked_vbar;
 static uint64_t hooked_vec_pa;
+static uint64_t hooked_irq_pa;
 static uint32_t saved_vec_insn;
+static uint32_t saved_irq_insn;
+static uint32_t irq_vec_words[4];
+#define ICC_PATCH_MAX 8
+static uint64_t icc_patch_va[ICC_PATCH_MAX];
+static uint32_t icc_patch_insn[ICC_PATCH_MAX];
+static unsigned icc_patch_n;
+
+static uint32_t pending_intid(void)
+{
+    uint64_t vctl = read_cntv_ctl_el0();
+    uint64_t pctl = read_cntp_ctl_el0();
+
+    {
+        int uart = pl011_rx_n != 0;
+        int tmr = (vctl & 1u) && !(vctl & 2u) &&
+                  ((vctl & 4u) || read_cntvct_el0() >= read_cntv_cval_el0());
+        static int prefer_uart;
+
+        /* Leftover RX bytes must not starve PPI 27: Shell WaitForKey polls
+         * on the timer if SerialDxe never registered INTID 33. */
+        if (uart && tmr) {
+            prefer_uart = !prefer_uart;
+            return prefer_uart ? VEIL_UART_INTID : 27u;
+        }
+        if (uart) {
+            return VEIL_UART_INTID;
+        }
+        if (tmr) {
+            return 27;
+        }
+    }
+    if ((pctl & 1u) && !(pctl & 2u) &&
+        ((pctl & 4u) || read_cntpct_el0() >= read_cntp_cval_el0())) {
+        return 30;
+    }
+    if (pl011_irq) {
+        return VEIL_UART_INTID;
+    }
+    return virtio_pending_intid();
+}
 
 void veil_timer_poll(void)
 {
-    uint32_t id = 0;
-    uint64_t vctl = read_cntv_ctl_el0();
-    uint64_t pctl = read_cntp_ctl_el0();
-    if ((vctl & 1u) && !(vctl & 2u) && read_cntvct_el0() >= read_cntv_cval_el0()) {
-        id = 27;
-    } else if ((pctl & 1u) && !(pctl & 2u) && read_cntpct_el0() >= read_cntp_cval_el0()) {
-        id = 30;
+    uint64_t hcr;
+    static unsigned trace_n;
+
+    guest_vbar_hook();
+    pl011_pull_host();
+    fb_ramfb_present();
+    {
+        uint64_t vctl = read_cntv_ctl_el0();
+        if (fb_ramfb_allow_virq() && (vctl & 3ull) != 0) {
+            static int unmask_cntv;
+            if (!unmask_cntv) {
+                uint64_t frq = read_cntfrq_el0();
+                if (frq == 0) {
+                    frq = 54000000ull;
+                }
+                write_cntv_ctl_el0((vctl | 1ull) & ~2ull);
+                write_cntv_tval_el0(frq / 200ull);
+                isb();
+                gicr_isenabler |= (1u << 27);
+                unmask_cntv = 1;
+                hyp_printf("veil: cntv kick was=0x%lx now=0x%lx\n",
+                           (unsigned long)vctl,
+                           (unsigned long)read_cntv_ctl_el0());
+            }
+        }
     }
-    timer_intid = id;
-    uint64_t hcr = read_hcr_el2();
-    if (id || virtio_pending_intid()) {
-        write_hcr_el2(hcr | HCR_EL2_VI);
-    } else {
-        write_hcr_el2(hcr & ~HCR_EL2_VI);
+    timer_intid = pending_intid();
+    hcr = read_hcr_el2();
+    {
+        uint64_t elr = read_elr_el2();
+        uint64_t vbar = read_vbar_el1();
+        int in_irq_vec = hooked_vbar && elr >= hooked_vbar + 0x280ull &&
+                         elr < hooked_vbar + 0x400ull;
+
+        if (fb_ramfb_allow_virq() && trace_n < 8u) {
+            uint64_t spsr = read_spsr_el2();
+            uint64_t pa280 = 0;
+            uint32_t i280 = 0;
+
+            if (guest_va_to_pa(vbar + 0x280, &pa280) == 0) {
+                i280 = *(volatile uint32_t *)(uintptr_t)pa280;
+            }
+            hyp_printf(
+                "veil: irqtr %u elr=%p I=%u insn=0x%x vbar=%p i280=0x%x igrp1=%u gicr=0x%x id=%u vi=%u cntv=0x%lx elr1=%p sp=%p\n",
+                trace_n, elr, (spsr & (1u << 7)) ? 1u : 0u,
+                guest_fetch_insn(elr), vbar, i280, icc_igrpen1,
+                gicr_isenabler, timer_intid, (hcr & HCR_EL2_VI) ? 1u : 0u,
+                (unsigned long)read_cntv_ctl_el0(), read_elr_el1(),
+                read_sp_el1());
+            trace_n++;
+        }
+        /* Do not inject vIRQ before the first quiet ramfb store. Earlier than
+         * that AAVMF still uses DefaultExceptionHandler. Waiting for pixels
+         * deadlocks: SetMode black, WFI, no timer, no logo.
+         * Holding VI while PSTATE.I=1 freezes EL1 on this A76 (handler
+         * stuck on one add after EOI). Drop the pin until ERET unmasks. */
+        if (in_irq_vec || (read_spsr_el2() & (1ull << 7))) {
+            write_hcr_el2(hcr & ~HCR_EL2_VI);
+        } else if (timer_intid && fb_ramfb_allow_virq()) {
+            static int vi_log;
+            write_hcr_el2(hcr | HCR_EL2_VI);
+            if (!vi_log) {
+                vi_log = 1;
+                hyp_printf("veil: inject vi id=%u cntv=0x%lx cntp=0x%lx\n",
+                           timer_intid, (unsigned long)read_cntv_ctl_el0(),
+                           (unsigned long)read_cntp_ctl_el0());
+            }
+        } else {
+            static int no_vi_log;
+            write_hcr_el2(hcr & ~HCR_EL2_VI);
+            if (fb_ramfb_allow_virq() && !timer_intid && !no_vi_log) {
+                no_vi_log = 1;
+                hyp_printf("veil: no guest timer cntv=0x%lx cntp=0x%lx\n",
+                           (unsigned long)read_cntv_ctl_el0(),
+                           (unsigned long)read_cntp_ctl_el0());
+            }
+        }
     }
     isb();
 }
 
+void veil_wfx_idle(struct trapframe *tf)
+{
+    uint64_t frq = read_cntfrq_el0();
+    uint64_t start = read_cntpct_el0();
+    uint64_t slice;
+
+    if (frq == 0) {
+        frq = 54000000ull;
+    }
+    slice = frq / 20ull;
+    pl011_pull_host();
+    while (read_cntpct_el0() - start < slice) {
+        veil_timer_poll();
+        pl011_pull_host();
+        if (pl011_rx_n) {
+            break;
+        }
+    }
+    timer_intid = pending_intid();
+    if (pl011_rx_n && tf) {
+        static int rx_log;
+        gicd_isenabler[1] |= (1u << 1); /* SPI 1 = INTID 33 */
+        timer_intid = VEIL_UART_INTID;
+        tf->spsr &= ~(1ull << 7);
+        write_hcr_el2(read_hcr_el2() | HCR_EL2_VI);
+        if (rx_log < 4) {
+            hyp_printf("veil: uart rx 0x%x n=%u\n", pl011_rx[pl011_rx_r],
+                       pl011_rx_n);
+            rx_log++;
+        }
+    }
+    fb_ramfb_present();
+}
+
+void veil_timer_poll_tf(struct trapframe *tf)
+{
+    uint32_t i0, i1, i2, i3;
+
+    veil_timer_poll();
+    if (!tf) {
+        return;
+    }
+    /* PerformanceLib delay: add x0,x0,x2; add x1,#1; cmp x20,x0; b.hi
+     * with x2=0 never reaches the deadline (seen at 0x7da97460 in IRQ). */
+    i0 = guest_fetch_insn(tf->elr);
+    i1 = guest_fetch_insn(tf->elr + 4);
+    i2 = guest_fetch_insn(tf->elr + 8);
+    i3 = guest_fetch_insn(tf->elr + 12);
+    if (i0 == 0x8b020000u && i1 == 0x91000421u && i2 == 0xeb00029fu &&
+        (i3 & 0xff00001fu) == 0x54000008u && tf->x[2] == 0) {
+        static int skip_log;
+        if (!skip_log) {
+            hyp_printf("veil: skip zero-step delay elr=%p x0=%p x20=%p\n",
+                       tf->elr, tf->x[0], tf->x[20]);
+            skip_log = 1;
+        }
+        tf->x[0] = tf->x[20];
+    }
+}
+
 int veil_timer_pending(void)
 {
-    return timer_intid != 0;
+    return timer_intid != 0 || pl011_irq;
 }
 
 uint32_t icc_ack_irq(void)
 {
     uint32_t id = timer_intid;
-    if (id) {
+
+    if (!id) {
+        id = pending_intid();
+    }
+    if (id == 27 || id == 30) {
         timer_intid = 0;
+        write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
         return id;
     }
-    uint32_t vid = virtio_pending_intid();
-    if (vid) {
-        virtio_ack_irq(vid);
-        return vid;
+    if (id == VEIL_UART_INTID) {
+        timer_intid = 0;
+        write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
+        return id;
+    }
+    if (id == 48 || id == 49) {
+        virtio_ack_irq(id);
+        timer_intid = 0;
+        return id;
     }
     return 1023;
 }
 
 void icc_eoi(uint32_t id)
 {
-    (void)id;
-    veil_timer_poll();
+    write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
+    {
+        static int eoi_log;
+        if (eoi_log < 4) {
+            hyp_printf("veil: eoi id=%u cntv=0x%lx\n", id,
+                       (unsigned long)read_cntv_ctl_el0());
+            eoi_log++;
+        }
+    }
 }
 
 int icc_emulate(struct trapframe *tf, uint32_t insn)
@@ -980,9 +1218,9 @@ int icc_emulate(struct trapframe *tf, uint32_t insn)
             } else if (crm == 8 && op2 == 0) {
                 val = 1023; /* ICC_IAR0_EL1 */
             } else if (crm == 11 && op2 == 3) {
-                val = 0xff; /* ICC_RPR_EL1 */
+                val = 0; /* ICC_RPR_EL1 idle */
             } else if (crm == 12 && op2 == 2) {
-                val = 1023; /* ICC_HPPIR1_EL1 */
+                val = timer_intid ? timer_intid : 1023;
             } else {
                 val = 0;
             }
@@ -1010,50 +1248,211 @@ int icc_emulate(struct trapframe *tf, uint32_t insn)
     if (!handled) {
         return -1;
     }
+    {
+        static unsigned icc_log;
+        if (icc_log < 24u) {
+            hyp_printf("veil: icc %s crm=%u op2=%u val=0x%x elr=%p\n",
+                       is_mrs ? "mrs" : "msr", crm, op2,
+                       is_mrs ? (unsigned)val : (rt != 31 ? (unsigned)tf->x[rt] : 0u),
+                       tf->elr);
+            icc_log++;
+        }
+    }
     if (is_mrs && rt != 31) {
         tf->x[rt] = val;
     }
     return 0;
 }
 
-void guest_vbar_hook(void)
+static void patch_hvc(uint64_t va, uint64_t *pa_out, uint32_t *saved)
 {
-    uint64_t vbar;
-
-    if (BOARD_GIC_PASSTHROUGH) {
-        return;
-    }
-    vbar = read_vbar_el1();
     uint64_t pa = 0;
     uint32_t *p;
 
-    if (vbar == hooked_vbar) {
-        return;
-    }
-    /* VBAR=0 is flash padding; patching it corrupts QEMU_EFI.fd at 0x200. */
-    if (vbar < VEIL_GUEST_RAM_IPA) {
-        return;
-    }
-    if (guest_va_to_pa(vbar + 0x200, &pa) != 0) {
+    if (guest_va_to_pa(va, &pa) != 0) {
         return;
     }
     p = (uint32_t *)(uintptr_t)pa;
     __asm__ volatile("dc civac, %0" ::"r"(p) : "memory");
     dsb_sy();
     if (*p == HVC_ICC_INSN) {
-        hooked_vbar = vbar;
-        hooked_vec_pa = pa;
+        *pa_out = pa;
         return;
     }
-    saved_vec_insn = *p;
+    *saved = *p;
     *p = HVC_ICC_INSN;
     dsb_sy();
     __asm__ volatile("dc cvau, %0" ::"r"(p) : "memory");
+    *pa_out = pa;
+}
+
+static int insn_is_icc(uint32_t insn)
+{
+    unsigned op0 = (insn >> 19) & 3u;
+    unsigned op1 = (insn >> 16) & 7u;
+    unsigned crn = (insn >> 12) & 15u;
+    unsigned crm = (insn >> 8) & 15u;
+    unsigned op2 = (insn >> 5) & 7u;
+    int mrs = (insn >> 21) & 1;
+
+    if (op0 != 3 || op1 != 0 || crn != 12) {
+        return 0;
+    }
+    if ((insn & 0xff800000u) != 0xd5000000u) {
+        return 0;
+    }
+    /* IAR1 / EOIR1 / HPPIR1 / IAR0 / EOIR0 only — not AP0R0/SRE/BPR. */
+    if (mrs && crm == 12 && op2 == 0) {
+        return 1;
+    }
+    if (!mrs && crm == 12 && op2 == 1) {
+        return 1;
+    }
+    if (mrs && crm == 12 && op2 == 2) {
+        return 1;
+    }
+    if (mrs && crm == 8 && op2 == 0) {
+        return 1;
+    }
+    if (!mrs && crm == 8 && op2 == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+static uint64_t b_target(uint64_t pc, uint32_t insn)
+{
+    int64_t imm = (int32_t)((insn & 0x03ffffffu) << 6) >> 6;
+
+    return pc + (uint64_t)(imm * 4);
+}
+
+static void patch_icc_at(uint64_t va, uint32_t insn)
+{
+    uint64_t pa = 0;
+    uint32_t *p;
+    unsigned i;
+
+    if (!insn_is_icc(insn) || icc_patch_n >= ICC_PATCH_MAX) {
+        return;
+    }
+    for (i = 0; i < icc_patch_n; i++) {
+        if (icc_patch_va[i] == va) {
+            return;
+        }
+    }
+    if (guest_va_to_pa(va, &pa) != 0) {
+        return;
+    }
+    p = (uint32_t *)(uintptr_t)pa;
+    icc_patch_va[icc_patch_n] = va;
+    icc_patch_insn[icc_patch_n] = insn;
+    *p = HVC_ICC_INSN;
+    dsb_sy();
+    __asm__ volatile("dc cvau, %0" ::"r"(p) : "memory");
+    dsb_ish();
+    __asm__ volatile("ic ivau, %0" ::"r"(p) : "memory");
+    hyp_printf("veil: icc patch va=%p insn=0x%x\n", va, insn);
+    icc_patch_n++;
+}
+
+static void scan_icc(uint64_t va0, unsigned n)
+{
+    unsigned i = 0;
+
+    while (i < n && icc_patch_n < ICC_PATCH_MAX) {
+        uint64_t va = va0 + (uint64_t)i * 4u;
+        uint64_t pa = 0;
+        unsigned j, chunk;
+
+        if (guest_va_to_pa(va, &pa) != 0) {
+            i++;
+            continue;
+        }
+        chunk = (unsigned)((4096u - (unsigned)(pa & 0xfffu)) / 4u);
+        if (chunk > n - i) {
+            chunk = n - i;
+        }
+        guest_mem_sync(pa, (size_t)chunk * 4u);
+        for (j = 0; j < chunk && icc_patch_n < ICC_PATCH_MAX; j++) {
+            uint32_t insn = *(volatile uint32_t *)(uintptr_t)(pa + (uint64_t)j * 4u);
+            patch_icc_at(va + (uint64_t)j * 4u, insn);
+        }
+        i += chunk;
+    }
+}
+
+void guest_vbar_hook(void)
+{
+    uint64_t vbar;
+    unsigned i;
+
+    if (BOARD_GIC_PASSTHROUGH) {
+        return;
+    }
+    vbar = read_vbar_el1();
+    if (vbar == hooked_vbar && hooked_vec_pa) {
+        return;
+    }
+    /* VBAR=0 is flash padding; patching it corrupts QEMU_EFI.fd at 0x200. */
+    if (vbar < VEIL_GUEST_RAM_IPA) {
+        return;
+    }
+    for (i = 0; i < 4u; i++) {
+        irq_vec_words[i] = guest_fetch_insn(vbar + 0x280 + (uint64_t)i * 4u);
+    }
+    patch_hvc(vbar + 0x200, &hooked_vec_pa, &saved_vec_insn);
+    hooked_irq_pa = 0;
+    saved_irq_insn = irq_vec_words[0];
+    icc_patch_n = 0;
+    scan_icc(vbar + 0x280, 32);
+    for (i = 0; i < 32u; i++) {
+        uint64_t va = vbar + 0x280 + (uint64_t)i * 4u;
+        uint32_t insn = guest_fetch_insn(va);
+        uint32_t op = insn & 0xfc000000u;
+
+        if (op == 0x14000000u || op == 0x94000000u) {
+            uint64_t tgt = b_target(va, insn);
+            unsigned k;
+            hyp_printf("veil: irq vec %s %p -> %p 0x%x 0x%x 0x%x 0x%x\n",
+                       op == 0x94000000u ? "bl" : "b", va, tgt,
+                       guest_fetch_insn(tgt), guest_fetch_insn(tgt + 4),
+                       guest_fetch_insn(tgt + 8), guest_fetch_insn(tgt + 12));
+            scan_icc(tgt, 1024);
+            for (k = 0; k < 64u; k++) {
+                uint32_t ins2 = guest_fetch_insn(tgt + (uint64_t)k * 4u);
+                uint32_t op2 = ins2 & 0xfc000000u;
+                if (op2 == 0x14000000u || op2 == 0x94000000u) {
+                    uint64_t t2 = b_target(tgt + (uint64_t)k * 4u, ins2);
+                    scan_icc(t2, 512);
+                }
+            }
+        }
+    }
+    /* IAR/EOI at VBAR+0x5f9fc (0x7dafd1fc) on this AAVMF. */
+    {
+        unsigned k;
+        uint64_t base = vbar + 0x5e000ull;
+        hyp_printf("veil: iar probe @%p = 0x%x loop @%p 0x%x 0x%x 0x%x 0x%x\n",
+                   vbar + 0x5f9fcu, guest_fetch_insn(vbar + 0x5f9fcu),
+                   vbar + 0x5f960ull, guest_fetch_insn(vbar + 0x5f960ull),
+                   guest_fetch_insn(vbar + 0x5f964ull),
+                   guest_fetch_insn(vbar + 0x5f968ull),
+                   guest_fetch_insn(vbar + 0x5f96cull));
+        for (k = 0; k < 4096u && icc_patch_n < ICC_PATCH_MAX; k++) {
+            uint64_t va = base + (uint64_t)k * 4u;
+            patch_icc_at(va, guest_fetch_insn(va));
+        }
+    }
     __asm__ volatile("ic ialluis" ::: "memory");
     dsb_ish();
     isb();
-    hooked_vbar = vbar;
-    hooked_vec_pa = pa;
+    if (hooked_vec_pa) {
+        hooked_vbar = vbar;
+        hyp_printf("veil: vbar hook %p irq0=0x%x 0x%x 0x%x 0x%x npatch=%u\n", vbar,
+                   irq_vec_words[0], irq_vec_words[1], irq_vec_words[2],
+                   irq_vec_words[3], icc_patch_n);
+    }
 }
 
 int guest_el1_sync_from_hvc(struct trapframe *tf)
@@ -1062,7 +1461,38 @@ int guest_el1_sync_from_hvc(struct trapframe *tf)
     uint64_t elr1 = read_elr_el1();
     uint32_t ec1 = (uint32_t)((esr1 >> ESR_EC_SHIFT) & ESR_EC_MASK);
     uint32_t insn = 0;
+    uint64_t off;
+    uint64_t hvc_pc = tf->elr >= 4ull ? tf->elr - 4ull : tf->elr;
+    unsigned i;
 
+    /* HVC preferred return is the next insn, so ELR_EL2 is patch VA + 4. */
+    for (i = 0; i < icc_patch_n; i++) {
+        if (tf->elr == icc_patch_va[i] || hvc_pc == icc_patch_va[i]) {
+            if (icc_emulate(tf, icc_patch_insn[i]) == 0) {
+                if (tf->elr == icc_patch_va[i]) {
+                    tf->elr += 4;
+                }
+                return 0;
+            }
+        }
+    }
+
+    off = hooked_vbar ? tf->elr - hooked_vbar : ~0ull;
+    if (off >= 0x200ull && off < 0x280ull) {
+        if (ec1 == 0) {
+            insn = guest_fetch_insn(elr1);
+            if (insn && icc_emulate(tf, insn) == 0) {
+                tf->elr = elr1 + 4;
+                tf->spsr = read_spsr_el1();
+                return 0;
+            }
+        }
+        hyp_printf("veil: el1 sync via hook esr=0x%lx elr1=%p insn=0x%x hvc=%p\n",
+                   (unsigned long)esr1, elr1, insn, tf->elr);
+        return -1;
+    }
+
+    /* Our HVC imm from a VBAR we have not recorded yet (race on first ICC). */
     if (ec1 == 0) {
         insn = guest_fetch_insn(elr1);
         if (insn && icc_emulate(tf, insn) == 0) {
@@ -1070,25 +1500,7 @@ int guest_el1_sync_from_hvc(struct trapframe *tf)
             tf->spsr = read_spsr_el1();
             return 0;
         }
-        hyp_printf("veil: el1 undef insn=0x%x elr=%p esr=0x%lx sctlr=0x%lx\n",
-                   insn, elr1, (unsigned long)esr1,
-                   (unsigned long)read_sctlr_el1());
     }
-
-    if (hooked_vec_pa && saved_vec_insn) {
-        *(volatile uint32_t *)(uintptr_t)hooked_vec_pa = saved_vec_insn;
-        dsb_sy();
-        __asm__ volatile("ic ialluis" ::: "memory");
-        dsb_ish();
-        isb();
-        tf->elr = hooked_vbar + 0x200;
-        hooked_vbar = 0;
-        hooked_vec_pa = 0;
-        return 0;
-    }
-
-    hyp_printf("veil: el1 sync via hook esr=0x%lx elr=%p insn=0x%x\n",
-               (unsigned long)esr1, elr1, insn);
     return -1;
 }
 

@@ -107,32 +107,43 @@ void veil_handle_trap(struct trapframe *tf)
 
     if (!BOARD_GIC_PASSTHROUGH) {
         guest_vbar_hook();
-        veil_timer_poll();
+        veil_timer_poll_tf(tf);
     }
 
     if (ec == ESR_EC_WFX) {
         static int wfi_log;
-        unsigned long spins = 0;
+
         if (!wfi_log) {
             wfi_log = 1;
-            hyp_printf("veil: guest wfi\n");
+            hyp_printf("veil: guest %s\n", (iss & 1u) ? "wfi" : "wfe");
         }
-        while (!veil_timer_pending() && spins < 1000000ul) {
-            veil_timer_poll();
-            spins++;
-        }
+        veil_wfx_idle(tf);
         tf->elr += 4;
         return;
     }
 
     if (ec == ESR_EC_HVC64) {
+        static unsigned hvc_log;
+
+        if (hvc_log < 16u) {
+            hyp_printf("veil: hvc esr=0x%lx elr=%p x0=%p\n",
+                       (unsigned long)esr, tf->elr, tf->x[0]);
+            hvc_log++;
+        }
+        if (guest_el1_sync_from_hvc(tf) == 0) {
+            return;
+        }
         if ((esr & 0xffffu) == 0x5645u) {
-            if (guest_el1_sync_from_hvc(tf) != 0) {
-                unexpected_trap(tf, esr, far);
+            static unsigned miss;
+            if (miss < 4u) {
+                hyp_printf("veil: unmatched icc hvc elr=%p skip\n", tf->elr);
+                miss++;
             }
+            /* ELR is already the insn after HVC. */
             return;
         }
         virtio_board_psci(tf);
+        tf->elr += 4;
         return;
     }
     if (ec == ESR_EC_SMC64) {
@@ -160,6 +171,23 @@ void veil_handle_trap(struct trapframe *tf)
 
     if (ec != ESR_EC_DABT_LOW) {
         unexpected_trap(tf, esr, far);
+    }
+
+    {
+        uint64_t ipa = ((read_hpfar_el2() & 0x0000ffffffffff0ull) << 8) |
+                       (far & 0xfffull);
+        if ((iss & ESR_ISS_WNR) &&
+            (s2_ramfb_fault(ipa) == 0 || s2_ramfb_fault(far) == 0)) {
+            static int ramfb_fault_log;
+
+            if (!ramfb_fault_log) {
+                ramfb_fault_log = 1;
+                hyp_printf("veil: ramfb s2 write hpfar=%p far=%p esr=0x%x\n",
+                           ipa, far, iss);
+            }
+            fb_ramfb_note_write();
+            return;
+        }
     }
 
     if (iss & ESR_ISS_ISV) {
@@ -295,7 +323,8 @@ void enter_guest(uint64_t entry, uint64_t arg0)
 
     uint64_t hcr = HCR_EL2_RW | HCR_EL2_VM | HCR_EL2_SWIO | HCR_EL2_TSC | HCR_EL2_TID3;
     if (!BOARD_GIC_PASSTHROUGH) {
-        hcr |= HCR_EL2_IMO | HCR_EL2_TWI;
+        hcr |= HCR_EL2_IMO | HCR_EL2_TWI | HCR_EL2_TWE;
+        /* Pi 5 GIC-400: ICC_SRE_EL2 is UNDEF at EL2 (ec=0 at enter_guest). */
     } else {
         write_icc_sre_el2(0xfu);
         isb();

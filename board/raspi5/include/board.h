@@ -21,7 +21,7 @@
 #define BOARD_NAME      "raspi5"
 #define BOARD_CPU       "bcm2712 cortex-a76"
 #define BOARD_GIC_PASSTHROUGH 0
-#define BOARD_GUEST_RAMFB 0
+#define BOARD_GUEST_RAMFB 1
 
 struct platform {
     const char *name;
@@ -40,6 +40,7 @@ void platform_clip_guest_ram(uint64_t pa, size_t n);
 void uart_init(void);
 void board_mask_host_irqs(void);
 void board_ack_host_irq(void);
+void board_start_ramfb_timer(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
 int fb_init(void);
@@ -47,4 +48,8 @@ int fb_set_mode(unsigned width, unsigned height);
 void fb_selftest(void);
 void fb_putc(char c);
 int fb_map_guest_ramfb(const uint8_t *be_cfg, uint32_t len);
+void fb_ramfb_present(void);
+void fb_ramfb_note_write(void);
+int fb_ramfb_shown(void);
+int fb_ramfb_allow_virq(void);
 int board_skip_testdisk(void);

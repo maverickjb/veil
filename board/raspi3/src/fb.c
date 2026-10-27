@@ -331,3 +331,21 @@ int fb_map_guest_ramfb(const uint8_t *be_cfg, uint32_t len)
     (void)len;
     return -1;
 }
+
+void fb_ramfb_present(void)
+{
+}
+
+void fb_ramfb_note_write(void)
+{
+}
+
+int fb_ramfb_shown(void)
+{
+    return 1;
+}
+
+int fb_ramfb_allow_virq(void)
+{
+    return 1;
+}

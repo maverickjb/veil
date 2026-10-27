@@ -177,6 +177,167 @@ void guest_mem_sync(uint64_t pa, size_t n)
     dsb_sy();
 }
 
+#define RAMFB_L3_MAX 4
+static uint64_t l3_fb[RAMFB_L3_MAX][512] __attribute__((aligned(4096)));
+static uint64_t l3_fb_ipa[RAMFB_L3_MAX];
+static unsigned l3_fb_n;
+static uint64_t ramfb_ipa0, ramfb_ipa1;
+
+static uint64_t s2_page(uint64_t pa, int ro)
+{
+    uint64_t ap = ro ? S2_AP_RO : S2_AP_RW;
+    return (pa & ~0xfffull) | S2_AF | S2_SH_IS | ap | S2_MEM_NORMAL | 3ull;
+}
+
+static uint64_t *s2_l2_for_ipa(uint64_t ipa, unsigned *idx)
+{
+    const struct platform *p = platform_get();
+    unsigned ram_first = (unsigned)((VEIL_GUEST_RAM_IPA >> 21) & 0x1ff);
+    uint64_t off;
+    unsigned block;
+
+    if (ipa < VEIL_GUEST_RAM_IPA) {
+        return 0;
+    }
+    off = ipa - VEIL_GUEST_RAM_IPA;
+    if (off >= p->guest_ram_size) {
+        return 0;
+    }
+    block = (unsigned)(off / L2_BLOCK);
+    if (ram_first + block < 512u) {
+        *idx = ram_first + block;
+        return l2_ram;
+    }
+    *idx = block - (512u - ram_first);
+    if (*idx >= 512u) {
+        return 0;
+    }
+    return l2_ram2;
+}
+
+static void s2_tlbi(void)
+{
+    dsb_sy();
+    tlbi_vmalls12e1is();
+    dsb_ish();
+    isb();
+}
+
+static void s2_pte_publish(volatile uint64_t *pte)
+{
+    guest_mem_sync((uint64_t)(uintptr_t)pte, sizeof(*pte));
+}
+
+static int s2_split_ram_block(uint64_t blk)
+{
+    unsigned idx, p, t;
+    uint64_t *l2 = s2_l2_for_ipa(blk, &idx);
+    uint64_t old, pa;
+
+    if (!l2) {
+        return -1;
+    }
+    for (t = 0; t < l3_fb_n; t++) {
+        if (l3_fb_ipa[t] == blk) {
+            return (int)t;
+        }
+    }
+    old = l2[idx];
+    if ((old & 3ull) == 3ull) {
+        return -1;
+    }
+    if (l3_fb_n >= RAMFB_L3_MAX) {
+        return -1;
+    }
+    t = l3_fb_n;
+    pa = old & 0x0000ffffffe00000ull;
+    for (p = 0; p < 512u; p++) {
+        l3_fb[t][p] = s2_page(pa + (uint64_t)p * 4096ull, 0);
+    }
+    l3_fb_ipa[t] = blk;
+    guest_mem_sync((uint64_t)(uintptr_t)&l3_fb[t][0], 4096);
+    l2[idx] = ((uint64_t)&l3_fb[t][0]) | S2_TABLE;
+    s2_pte_publish(&l2[idx]);
+    l3_fb_n++;
+    return (int)t;
+}
+
+int s2_ramfb_watch(uint64_t ipa, size_t n)
+{
+    uint64_t start, end, blk;
+    unsigned t, p;
+
+    if (!n) {
+        return -1;
+    }
+    ramfb_ipa0 = ipa;
+    ramfb_ipa1 = ipa + n;
+    start = ipa & ~(L2_BLOCK - 1ull);
+    end = (ipa + n + L2_BLOCK - 1ull) & ~(L2_BLOCK - 1ull);
+    for (blk = start; blk < end; blk += L2_BLOCK) {
+        if (s2_split_ram_block(blk) < 0) {
+            return -1;
+        }
+    }
+    for (t = 0; t < l3_fb_n; t++) {
+        for (p = 0; p < 512u; p++) {
+            uint64_t page_ipa = l3_fb_ipa[t] + (uint64_t)p * 4096ull;
+            if (page_ipa >= ramfb_ipa0 && page_ipa < ramfb_ipa1) {
+                l3_fb[t][p] &= ~S2_AP_RW;
+                l3_fb[t][p] |= S2_AP_RO;
+            } else {
+                l3_fb[t][p] |= S2_AP_RW;
+            }
+            s2_pte_publish(&l3_fb[t][p]);
+        }
+    }
+    s2_tlbi();
+    return 0;
+}
+
+int s2_ramfb_fault(uint64_t ipa)
+{
+    unsigned t, p;
+
+    if (!l3_fb_n || ipa < ramfb_ipa0 || ipa >= ramfb_ipa1) {
+        return -1;
+    }
+    for (t = 0; t < l3_fb_n; t++) {
+        if (ipa >= l3_fb_ipa[t] && ipa < l3_fb_ipa[t] + L2_BLOCK) {
+            p = (unsigned)((ipa - l3_fb_ipa[t]) >> 12);
+            l3_fb[t][p] |= S2_AP_RW;
+            s2_pte_publish(&l3_fb[t][p]);
+            dsb_sy();
+            __asm__ volatile("tlbi ipas2e1is, %0" ::"r"(ipa >> 12) : "memory");
+            dsb_ish();
+            __asm__ volatile("tlbi vmalle1is" ::: "memory");
+            dsb_ish();
+            isb();
+            return 0;
+        }
+    }
+    return -1;
+}
+
+void s2_ramfb_ro(void)
+{
+    unsigned t, p;
+
+    for (t = 0; t < l3_fb_n; t++) {
+        for (p = 0; p < 512u; p++) {
+            uint64_t page_ipa = l3_fb_ipa[t] + (uint64_t)p * 4096ull;
+            if (page_ipa >= ramfb_ipa0 && page_ipa < ramfb_ipa1) {
+                l3_fb[t][p] &= ~S2_AP_RW;
+                l3_fb[t][p] |= S2_AP_RO;
+                s2_pte_publish(&l3_fb[t][p]);
+            }
+        }
+    }
+    if (l3_fb_n) {
+        s2_tlbi();
+    }
+}
+
 int s2_ipa_to_pa(uint64_t ipa, uint64_t *pa, size_t *remain)
 {
     const struct platform *p = platform_get();
@@ -248,8 +409,8 @@ void s2_init(void)
         }
     }
 
-    write_vtcr_el2(VTCR_T0SZ_40 | VTCR_SL0_L1 | VTCR_IRGN0_WB | VTCR_ORGN0_WB |
-                   VTCR_SH0_IS | VTCR_TG0_4K | VTCR_PS_40);
+    write_vtcr_el2(VTCR_T0SZ_40 | VTCR_SL0_L1 | VTCR_SH0_IS | VTCR_TG0_4K |
+                   VTCR_PS_40);
     write_vttbr_el2((uint64_t)l1);
     isb();
     tlbi_vmalls12e1is();

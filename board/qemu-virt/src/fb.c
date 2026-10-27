@@ -426,3 +426,21 @@ int fb_map_guest_ramfb(const uint8_t *be_cfg, uint32_t len)
                ipa, pa, w, h, fourcc, stride);
     return 0;
 }
+
+void fb_ramfb_present(void)
+{
+}
+
+void fb_ramfb_note_write(void)
+{
+}
+
+int fb_ramfb_shown(void)
+{
+    return 1;
+}
+
+int fb_ramfb_allow_virq(void)
+{
+    return 1;
+}

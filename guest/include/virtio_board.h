@@ -24,6 +24,8 @@ int icc_emulate(struct trapframe *tf, uint32_t insn);
 void guest_vbar_hook(void);
 int guest_el1_sync_from_hvc(struct trapframe *tf);
 void veil_timer_poll(void);
+void veil_timer_poll_tf(struct trapframe *tf);
+void veil_wfx_idle(struct trapframe *tf);
 int veil_timer_pending(void);
 uint32_t icc_ack_irq(void);
 void icc_eoi(uint32_t id);

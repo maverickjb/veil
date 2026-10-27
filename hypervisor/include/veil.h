@@ -27,6 +27,9 @@ int s2_ipa_to_pa(uint64_t ipa, uint64_t *pa, size_t *remain);
 int guest_va_to_pa(uint64_t va, uint64_t *pa);
 uint32_t guest_fetch_insn(uint64_t va);
 void guest_mem_sync(uint64_t pa, size_t n);
+int s2_ramfb_watch(uint64_t ipa, size_t n);
+int s2_ramfb_fault(uint64_t ipa);
+void s2_ramfb_ro(void);
 
 /* main / trap */
 void veil_handle_trap(struct trapframe *tf);
