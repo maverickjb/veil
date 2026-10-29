@@ -40,6 +40,8 @@ int virt_mmio_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
 int pl031_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
 void pflash_init(void);
 int pflash_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
+void fw_cfg_init(void);
+int fw_cfg_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
 void dtb_init(void);
 const uint8_t *dtb_blob(void);
 uint32_t dtb_size(void);
