@@ -28,16 +28,6 @@ else
 fi
 
 case "$platform" in
-    raspi3)
-        qemu=(
-            qemu-system-aarch64
-            -machine raspi3b
-            "${display_args[@]}"
-            "${debug_args[@]}"
-            -serial mon:stdio
-            -kernel "$bin"
-        )
-        ;;
     qemu-virt)
         qemu=(
             qemu-system-aarch64
@@ -103,7 +93,7 @@ case "$platform" in
         exit 0
         ;;
     *)
-        echo "unknown PLATFORM=$platform (raspi3|raspi5|qemu-virt)" >&2
+        echo "unknown PLATFORM=$platform (raspi5|qemu-virt)" >&2
         exit 1
         ;;
 esac

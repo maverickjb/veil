@@ -66,7 +66,7 @@ void uart_init(void)
 {
     /*
      * Firmware already programmed uart10 (115200 8n1) for the debug header.
-     * Do not rewrite IBRD/FBRD — those divisors are QEMU-raspi3 values.
+     * Do not rewrite IBRD/FBRD — firmware already set 115200 for uart10.
      * Drop RX/TX IRQs so HCR.IMO does not livelock EL2 on uart10.
      */
     *uart_reg(PL011_IMSC) = 0;

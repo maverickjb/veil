@@ -6,12 +6,12 @@ DTC     ?= $(firstword $(wildcard $(CURDIR)/tools/dtc) $(wildcard /usr/bin/dtc) 
 
 # Host SoC (real map) vs guest/ (presented virt machine, not a host).
 PLATFORM ?= qemu-virt
-ifeq ($(PLATFORM),raspi3)
-BOARD := raspi3
-else ifeq ($(PLATFORM),raspi5)
+ifeq ($(PLATFORM),raspi5)
 BOARD := raspi5
-else
+else ifeq ($(PLATFORM),qemu-virt)
 BOARD := qemu-virt
+else
+$(error unknown PLATFORM=$(PLATFORM); use qemu-virt or raspi5)
 endif
 
 # aavmf = pre-built ARM UEFI in bios/QEMU_EFI.fd. mini = tiny virtio BIOS.

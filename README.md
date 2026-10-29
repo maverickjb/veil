@@ -4,40 +4,59 @@ EL2 hypervisor that hides a real ARM64 SoC and presents a **QEMU virt**
 machine (PL011, GICv3, fw_cfg, virtio-mmio) to the guest. The guest is
 QEMU's own ARM UEFI — **AAVMF** / `QEMU_EFI.fd` — not a custom BIOS.
 
-Host and guest maps are different on purpose.
+Host and guest maps are different on purpose. Default `make` is
+`PLATFORM=qemu-virt`. Real hardware is `PLATFORM=raspi5`.
 
 ```
-board/raspi3    host SoC (UART, mailbox FB, linker)
-board/raspi5    host SoC (BCM2712, real hardware; no QEMU)
-board/qemu-virt default host (QEMU virt + ramfb / virtio-gpu)
-guest/          presented virt machine (dts, virtio-mmio, PL011, GIC, fw_cfg)
-bios/           guest firmware: QEMU_EFI.fd (pre-built) and GUEST=mini
-hypervisor      EL2 core (boot, traps, stage-2)
+board/raspi5      host SoC (BCM2712); fb.c mailbox, fb_term.c ANSI,
+                  fb_ramfb.c guest GOP blit
+board/qemu-virt   default host (QEMU virt + ramfb / virtio-gpu)
+guest/            presented virt machine
+  dts, virtio, mmio.c, pl011, pl031, pflash, fw_cfg, psci
+  gic_dist.c, gic_cpu.c (ICC / VBAR HVC hook), irq.c (vIRQ)
+bios/             QEMU_EFI.fd (pre-built) and GUEST=mini
+hypervisor        EL2: boot, traps, stage-2
 ```
 
 ```
-EL1  AAVMF (QEMU_EFI.fd)           ← virt map: flash 0x0, RAM 0x40000000
-EL2  Veil                          ← translates virt MMIO ↔ BCM UART
-HW   Raspberry Pi 3B (BCM2837)     ← RAM at 0x0, UART at 0x3f201000
+EL1  AAVMF (QEMU_EFI.fd)        virt map: flash 0x0, RAM 0x40000000
+EL2  Veil                       virt MMIO ↔ host UART / HDMI / GIC-400
+HW   Pi 5 (BCM2712) or QEMU     host map is not the virt map
 ```
 
-## Stage 1
+On Pi hosts there is no VGIC. EL1 `ICC_*` UNDEF; Veil patches AAVMF
+CpuDxe IAR/EOI to HVC and emulates GICv3. `PLATFORM=qemu-virt` passes
+the host GICv3 through.
 
-- Host: QEMU `-M raspi3b`
-- Guest firmware: `bios/QEMU_EFI.fd` (pre-built AAVMF, same image QEMU
-  uses with `-bios` on `virt`)
-- Stage-2: `ipa 0x40000000 → pa 0x01000000`, flash at `ipa 0x0`,
-  host UART unmapped
-- Emulated for AAVMF: PL011 @ `0x09000000`, GICv3 stub, fw_cfg + DTB,
-  virtio-console, PSCI
+## Traps
 
-The tiny virtio BIOS is still there as `GUEST=mini`.
+Three timelines, not one `handle_trap` kitchen sink:
+
+| Path | Entry | Work |
+|------|--------|------|
+| EL1 sync | `veil_handle_trap` | WFX → `guest_wfx`; HVC → `guest_hvc`; SYS64 → `guest_sys64` / `icc_emulate`; DABT → ramfb fault or `guest_mmio` |
+| Host IRQ | `el1_irq` / `el2_irq` | ack host (CNTHP / uart10), then `veil_timer_poll_tf` |
+| WFI idle | WFX trap | `veil_wfx_idle` (same tick as host IRQ: hook VBAR, PL011 pull, ramfb present, vIRQ) |
+
+`guest_vbar_hook` runs on sync (cheap VBAR compare) and on the tick path.
+`VBAR_EL1` is not trapped. Do not poll CNTV from arbitrary DABT.
+
+vIRQ: `idle → pending(id) → in_service → eoi → idle`. `HCR.VI` is not
+asserted if `PSTATE.I=1` or EL1 PC is in the VBAR IRQ slot. GOP vIRQ is
+gated on `guest_gop_ready()` (first quiet ramfb store, often SetMode
+black). UART ConIn is the host UART; HDMI is ramfb GOP, not UART glyphs.
 
 ## Build and run
 
 Needs `gcc-aarch64-linux-gnu`, `qemu-system-arm`, and
 `device-tree-compiler` (`dtc`) to build `guest/dts/virt.dts`.
 Guest UEFI is the pre-built `bios/QEMU_EFI.fd`.
+
+`build/veil.elf` is shared across platforms. After switching
+`PLATFORM`, `rm -f build/veil.elf build/veil.bin` or the link may no-op.
+
+Hot-path UART logs share ConIn. Default `VEIL_DEBUG=0`. Restore with
+`make VEIL_DEBUG=1`.
 
 ```bash
 make              # GUEST=aavmf PLATFORM=qemu-virt
@@ -49,12 +68,11 @@ make ref          # stock QEMU virt + AAVMF + testdisk (no Veil)
 make debug        # Veil + gdbstub :1234; then: gdb-multiarch -x scripts/gdb-veil.gdb
 
 make GUEST=mini run                 # original tiny virtio BIOS
-make PLATFORM=raspi3 run            # Pi 3 host in QEMU (HDMI text console)
 make PLATFORM=raspi5                # real Pi 5 image
-make PLATFORM=raspi5 tftp           # stage build/tftp for netboot
+SERIAL=b16438be make PLATFORM=raspi5 tftp   # stage build/tftp/<serial>/
 ```
 
-Expected:
+Expected on `make run`:
 
 ```
 veil: el2 hypervisor on qemu-virt (cortex-a76)
@@ -107,14 +125,16 @@ These are what AAVMF sees. Host SoC addresses stay unmapped.
 | `0x09010000` | PL031 RTC | emulated |
 | `0x09020000` | fw_cfg | `etc/fdt`, `etc/ramfb`, `etc/smbios/*` |
 | `0x0a000000` | virtio-mmio console | id 3 |
-| `0x0a000200` | virtio-mmio block | id 2, embedded testdisk ESP |
+| `0x0a000200` | virtio-mmio block | id 2, embedded testdisk ESP (skipped on raspi5) |
 | `0x10000000` | PCI MMIO (32-bit) | qemu-virt only |
 | `0x3eff0000` | PCI I/O | qemu-virt only |
-| `0x40000000` | RAM | identity on qemu-virt; offset on raspi3/raspi5 |
+| `0x40000000` | RAM | identity on qemu-virt; offset on raspi5 |
 | `0x4010000000` | PCI ECAM | qemu-virt only |
 | `0x8000000000` | PCI MMIO (64-bit) | qemu-virt only |
 
 Also in the guest DTB: one CPU, PSCI (`hvc`), ARM generic timer, `apb-pclk`.
+Guest timer is CNTV PPI 27; UART SPI is INTID 33. Host CNTHP is PPI 26 and
+is not a guest interrupt.
 
 ## Host devices (`PLATFORM=qemu-virt`)
 
@@ -136,18 +156,27 @@ QEMU attaches these on the host; Veil identity-maps PCI so AAVMF programs them.
 | `PLATFORM` | Board | How to run |
 |------------|-------|------------|
 | `qemu-virt` (default) | QEMU `virt` + virtualization | `make run` |
-| `raspi3` | BCM2837, QEMU `raspi3b` | `make PLATFORM=raspi3 run` |
-| `raspi5` | BCM2712, real hardware only | SD: copy `veil.bin` + `config.txt`, or `make PLATFORM=raspi5 tftp` |
+| `raspi5` | BCM2712, real hardware only | SD: copy `veil.bin` + `config.txt`, or TFTP below |
 
-### Raspberry Pi 5 TFTP
+### Raspberry Pi 5
 
-`QEMU_EFI.fd` is not a TFTP file. It is linked into `veil.bin`.
+Mailbox HDMI is 1920×1080 RGB565. Guest GOP is fw_cfg `etc/ramfb`
+(typically XR24 800×600). `fb_ramfb.c` waits until GOP stores go quiet,
+skips an all-black frame (`painted=0`), then convert-on-copy to HDMI.
+UART is ConIn/ConOut only — do not paint UART onto HDMI.
+
+`QEMU_EFI.fd` is not a TFTP file. It is linked into `veil.bin`. EEPROM
+`TFTP_PREFIX=1` needs the board serial:
 
 ```bash
-make PLATFORM=raspi5 tftp          # fills build/tftp/
-# SERIAL=abcd1234 make PLATFORM=raspi5 tftp   # if EEPROM TFTP_PREFIX=1
+SERIAL=b16438be make PLATFORM=raspi5 tftp   # build/tftp/<serial>/kernel_2712.img
 ```
 
-On the Pi, set EEPROM `BOOT_ORDER` to include network (`0xf21` or `0xf2`) and `TFTP_IP` to the server. Serve `build/tftp` with dnsmasq (`scripts/dnsmasq-raspi5.conf.example`). Also copy `bcm2712-rpi-5-b.dtb` from a Pi OS boot partition if the script cannot find one. UART is the JST-SH header next to USB-C, 115200 8n1.
+On the Pi, set EEPROM `BOOT_ORDER` to include network (`0xf21` or `0xf2`)
+and `TFTP_IP` to the server. Serve `build/tftp` with dnsmasq
+(`scripts/dnsmasq-raspi5.conf.example`). Also copy `bcm2712-rpi-5-b.dtb`
+from a Pi OS boot partition if the script cannot find one. UART is the
+JST-SH header next to USB-C, 115200 8n1.
 
-Guest PXE (AAVMF “PXE over IPv4”) is a different path: it needs a virt NIC, which exists on `PLATFORM=qemu-virt` only.
+Guest PXE (AAVMF “PXE over IPv4”) is a different path: it needs a virt NIC,
+which exists on `PLATFORM=qemu-virt` only.
