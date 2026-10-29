@@ -105,49 +105,20 @@ void veil_handle_trap(struct trapframe *tf)
     uint64_t data = 0;
     uint64_t data2 = 0;
 
+    /* Sync vs host IRQ vs WFI are separate timelines. Do not poll here.
+     * VBAR_EL1 is not trapped: CpuDxe does msr VBAR then mrs ICC_SRE with
+     * no EL2 entry in between. The next DABT (GICD/fw_cfg) is when we see
+     * the new table. guest_vbar_hook is a cheap VBAR compare if unchanged. */
     if (!BOARD_GIC_PASSTHROUGH) {
         guest_vbar_hook();
-        veil_timer_poll_tf(tf);
     }
 
     if (ec == ESR_EC_WFX) {
-        static int wfi_log;
-
-        if (!wfi_log) {
-            wfi_log = 1;
-            hyp_printf("veil: guest %s\n", (iss & 1u) ? "wfi" : "wfe");
-        }
-        veil_wfx_idle(tf);
-        tf->elr += 4;
+        guest_wfx(tf, iss);
         return;
     }
-
     if (ec == ESR_EC_HVC64) {
-#if VEIL_DEBUG
-        static unsigned hvc_log;
-
-        if (hvc_log < 16u) {
-            hyp_printf("veil: hvc esr=0x%lx elr=%p x0=%p\n",
-                       (unsigned long)esr, tf->elr, tf->x[0]);
-            hvc_log++;
-        }
-#endif
-        if (guest_el1_sync_from_hvc(tf) == 0) {
-            return;
-        }
-        if ((esr & 0xffffu) == HVC_ICC_IMM) {
-#if VEIL_DEBUG
-            static unsigned miss;
-            if (miss < 4u) {
-                hyp_printf("veil: unmatched icc hvc elr=%p skip\n", tf->elr);
-                miss++;
-            }
-#endif
-            /* ELR is already the insn after HVC. */
-            return;
-        }
-        virtio_board_psci(tf);
-        tf->elr += 4;
+        guest_hvc(tf, esr);
         return;
     }
     if (ec == ESR_EC_SMC64) {
@@ -156,17 +127,7 @@ void veil_handle_trap(struct trapframe *tf)
         return;
     }
     if (ec == ESR_EC_SYS64) {
-        int is_read = iss & 1u;
-        unsigned crm = (iss >> 1) & 15u;
-        unsigned rt = (iss >> 5) & 31u;
-        unsigned crn = (iss >> 10) & 15u;
-        unsigned op1 = (iss >> 14) & 7u;
-        unsigned op2 = (iss >> 17) & 7u;
-        unsigned op0 = (iss >> 20) & 3u;
-        uint32_t insn = 0xd5000000u | (is_read ? (1u << 21) : 0) |
-                        (op0 << 19) | (op1 << 16) | (crn << 12) | (crm << 8) |
-                        (op2 << 5) | rt;
-        if (icc_emulate(tf, insn) != 0 && veil_emulate_sys64(tf, iss) != 0) {
+        if (guest_sys64(tf, iss) != 0) {
             unexpected_trap(tf, esr, far);
         }
         tf->elr += 4;
@@ -225,11 +186,11 @@ void veil_handle_trap(struct trapframe *tf)
         data2 = tf->x[rt2];
     }
 
-    if (virtio_board_mmio(far, is_write, size, &data) != 0) {
+    if (guest_mmio(far, is_write, size, &data) != 0) {
         hyp_printf("veil: guest touched hidden hardware at %p\n", far);
         unexpected_trap(tf, esr, far);
     }
-    if (is_pair && virtio_board_mmio(far + size, is_write, size, &data2) != 0) {
+    if (is_pair && guest_mmio(far + size, is_write, size, &data2) != 0) {
         hyp_printf("veil: guest touched hidden hardware at %p\n", far + size);
         unexpected_trap(tf, esr, far + size);
     }

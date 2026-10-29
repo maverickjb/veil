@@ -76,6 +76,7 @@ el2_vectors:
     ventry  hang
     ventry  hang
 
+    /* Host IRQ timeline (CNTHP / uart). Tick here, not from EL1 sync. */
 el1_irq:
     save_regs
     bl      board_ack_host_irq
@@ -92,6 +93,7 @@ el2_irq:
     restore_regs
     eret
 
+    /* EL1 sync timeline: WFX / HVC / SYS64 / DABT. WFX is the idle tick. */
 el1_sync:
     save_regs
     mov     x0, sp

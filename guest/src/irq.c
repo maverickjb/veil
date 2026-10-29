@@ -144,33 +144,55 @@ static void irq_idle(void)
     write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
 }
 
+void guest_cntv_kick(void)
+{
+    uint64_t vctl;
+    static int unmask_cntv;
+
+    if (unmask_cntv || !fb_ramfb_allow_virq()) {
+        return;
+    }
+    vctl = read_cntv_ctl_el0();
+    if ((vctl & 3ull) == 0) {
+        return;
+    }
+    {
+        uint64_t frq = read_cntfrq_el0();
+        if (frq == 0) {
+            frq = 54000000ull;
+        }
+        write_cntv_ctl_el0((vctl | 1ull) & ~2ull);
+        write_cntv_tval_el0(frq / 200ull);
+        isb();
+        gic_enable_intid(VEIL_CNTV_INTID);
+        unmask_cntv = 1;
+        hyp_debug("veil: cntv kick was=0x%lx now=0x%lx\n",
+                  (unsigned long)vctl,
+                  (unsigned long)read_cntv_ctl_el0());
+    }
+}
+
 void veil_timer_poll(void)
 {
+    /* VBAR_EL1 is not trapped; notice a new table on the tick path. */
     guest_vbar_hook();
     pl011_pull_host();
     fb_ramfb_present();
-    {
-        uint64_t vctl = read_cntv_ctl_el0();
-        if (fb_ramfb_allow_virq() && (vctl & 3ull) != 0) {
-            static int unmask_cntv;
-            if (!unmask_cntv) {
-                uint64_t frq = read_cntfrq_el0();
-                if (frq == 0) {
-                    frq = 54000000ull;
-                }
-                write_cntv_ctl_el0((vctl | 1ull) & ~2ull);
-                write_cntv_tval_el0(frq / 200ull);
-                isb();
-                gic_enable_intid(VEIL_CNTV_INTID);
-                unmask_cntv = 1;
-                hyp_debug("veil: cntv kick was=0x%lx now=0x%lx\n",
-                          (unsigned long)vctl,
-                          (unsigned long)read_cntv_ctl_el0());
-            }
-        }
-    }
+    guest_cntv_kick();
     irq_pending(pending_intid());
     isb();
+}
+
+void guest_wfx(struct trapframe *tf, uint32_t iss)
+{
+    static int wfi_log;
+
+    if (!wfi_log) {
+        wfi_log = 1;
+        hyp_printf("veil: guest %s\n", (iss & 1u) ? "wfi" : "wfe");
+    }
+    veil_wfx_idle(tf);
+    tf->elr += 4;
 }
 
 void veil_wfx_idle(struct trapframe *tf)

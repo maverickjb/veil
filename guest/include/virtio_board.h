@@ -20,6 +20,13 @@ void virtio_board_init(void);
 int virtio_board_mmio(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
 int virtio_board_psci(struct trapframe *tf);
 
+/* EL1 sync dispatch. Host IRQ / WFX idle tick separately. */
+void guest_wfx(struct trapframe *tf, uint32_t iss);
+int guest_hvc(struct trapframe *tf, uint64_t esr);
+int guest_sys64(struct trapframe *tf, uint32_t iss);
+int guest_mmio(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
+void guest_cntv_kick(void);
+
 int icc_emulate(struct trapframe *tf, uint32_t insn);
 void guest_vbar_hook(void);
 int guest_el1_sync_from_hvc(struct trapframe *tf);

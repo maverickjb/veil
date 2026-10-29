@@ -75,7 +75,6 @@ static void virtio_pend_spi(uint32_t spi)
 #else
     (void)spi;
     irq_latch = 1;
-    veil_timer_poll();
 #endif
 }
 

@@ -364,3 +364,35 @@ int guest_el1_sync_from_hvc(struct trapframe *tf)
     }
     return -1;
 }
+
+int guest_hvc(struct trapframe *tf, uint64_t esr)
+{
+    guest_vbar_hook();
+#if VEIL_DEBUG
+    {
+        static unsigned hvc_log;
+        if (hvc_log < 16u) {
+            hyp_printf("veil: hvc esr=0x%lx elr=%p x0=%p\n",
+                       (unsigned long)esr, tf->elr, tf->x[0]);
+            hvc_log++;
+        }
+    }
+#endif
+    if (guest_el1_sync_from_hvc(tf) == 0) {
+        return 0;
+    }
+    if ((esr & 0xffffu) == HVC_ICC_IMM) {
+#if VEIL_DEBUG
+        static unsigned miss;
+        if (miss < 4u) {
+            hyp_printf("veil: unmatched icc hvc elr=%p skip\n", tf->elr);
+            miss++;
+        }
+#endif
+        /* ELR is already the insn after HVC. */
+        return 0;
+    }
+    virtio_board_psci(tf);
+    tf->elr += 4;
+    return 0;
+}

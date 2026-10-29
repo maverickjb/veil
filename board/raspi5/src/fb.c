@@ -1029,6 +1029,7 @@ void fb_ramfb_present(void)
         ramfb_irq_ok = 1;
         hyp_debug("veil: ramfb virq wr=%u painted=%u\n", ramfb_writes,
                   painted);
+        guest_cntv_kick();
     }
     if (!painted) {
         s2_ramfb_ro();
