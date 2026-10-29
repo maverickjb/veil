@@ -20,6 +20,29 @@ enum {
 };
 
 static unsigned irq_st;
+static int gop_ready;
+
+int guest_gop_ready(void)
+{
+    if (!BOARD_GUEST_RAMFB || BOARD_GIC_PASSTHROUGH) {
+        return 1;
+    }
+    return gop_ready;
+}
+
+void guest_gop_note_quiet(void)
+{
+    if (gop_ready) {
+        return;
+    }
+    gop_ready = 1;
+    guest_cntv_kick();
+}
+
+void guest_gop_reset(void)
+{
+    gop_ready = 0;
+}
 
 uint32_t irq_latched_id(void)
 {
@@ -77,7 +100,7 @@ static void irq_apply_pin(void)
         static unsigned trace_n;
         uint64_t elr = read_elr_el2();
         uint64_t vbar = read_vbar_el1();
-        if (fb_ramfb_allow_virq() && trace_n < 8u) {
+        if (guest_gop_ready() && trace_n < 8u) {
             uint64_t spsr = read_spsr_el2();
             uint64_t pa280 = 0;
             uint32_t i280 = 0;
@@ -101,7 +124,7 @@ static void irq_apply_pin(void)
      * (SetMode black, WFI, no timer, no logo). */
     if (irq_pin_blocked()) {
         write_hcr_el2(hcr & ~HCR_EL2_VI);
-    } else if (irq_st == IRQ_PENDING && irq_id && fb_ramfb_allow_virq()) {
+    } else if (irq_st == IRQ_PENDING && irq_id && guest_gop_ready()) {
         static int vi_log;
         write_hcr_el2(hcr | HCR_EL2_VI);
         if (!vi_log) {
@@ -113,7 +136,7 @@ static void irq_apply_pin(void)
     } else {
         static int no_vi_log;
         write_hcr_el2(hcr & ~HCR_EL2_VI);
-        if (fb_ramfb_allow_virq() && !irq_id && !no_vi_log) {
+        if (guest_gop_ready() && !irq_id && !no_vi_log) {
             no_vi_log = 1;
             hyp_debug("veil: no guest timer cntv=0x%lx cntp=0x%lx\n",
                       (unsigned long)read_cntv_ctl_el0(),
@@ -149,7 +172,7 @@ void guest_cntv_kick(void)
     uint64_t vctl;
     static int unmask_cntv;
 
-    if (unmask_cntv || !fb_ramfb_allow_virq()) {
+    if (unmask_cntv || !guest_gop_ready()) {
         return;
     }
     vctl = read_cntv_ctl_el0();

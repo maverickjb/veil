@@ -344,8 +344,3 @@ int fb_ramfb_shown(void)
 {
     return 1;
 }
-
-int fb_ramfb_allow_virq(void)
-{
-    return 1;
-}

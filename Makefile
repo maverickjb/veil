@@ -48,6 +48,9 @@ HYP_CORE := hypervisor/src/boot.S \
 
 BOARD_SRCS := board/$(BOARD)/src/board.c \
               board/$(BOARD)/src/fb.c
+ifeq ($(BOARD),raspi5)
+BOARD_SRCS += board/raspi5/src/fb_term.c board/raspi5/src/fb_ramfb.c
+endif
 
 VIRT_SRCS := guest/src/init.c \
              guest/src/virtio.c \

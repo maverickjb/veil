@@ -26,6 +26,9 @@ int guest_hvc(struct trapframe *tf, uint64_t esr);
 int guest_sys64(struct trapframe *tf, uint32_t iss);
 int guest_mmio(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
 void guest_cntv_kick(void);
+int guest_gop_ready(void);
+void guest_gop_note_quiet(void);
+void guest_gop_reset(void);
 
 int icc_emulate(struct trapframe *tf, uint32_t insn);
 void guest_vbar_hook(void);

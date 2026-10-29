@@ -1,0 +1,606 @@
+#include "fb_priv.h"
+
+/* Host ANSI terminal and mailbox selftest. Not on the GOP blit path. */
+
+#include "font8x8.inc"
+
+static unsigned cur_c, cur_r;
+static unsigned sav_c, sav_r;
+static unsigned dirty_r0, dirty_r1;
+static unsigned dirty_c0, dirty_c1;
+static unsigned dirty_n;
+
+enum {
+    ANSI_NORM = 0,
+    ANSI_ESC,
+    ANSI_CSI,
+    ANSI_IGN
+};
+static int ansi_st;
+static unsigned ansi_arg[16];
+static unsigned ansi_nargs;
+static unsigned ansi_acc;
+static int ansi_in_num;
+static unsigned sgr_fg_i = 7;
+static unsigned sgr_bg_i;
+static int sgr_fg_bright;
+static int sgr_bg_bright;
+static int sgr_bold;
+static int sgr_rev;
+
+static unsigned fb_cols(void)
+{
+    return TERM_COLS;
+}
+
+static unsigned fb_rows(void)
+{
+    return TERM_ROWS;
+}
+
+static void fb_dirty_reset(void)
+{
+    dirty_r0 = 1;
+    dirty_r1 = 0;
+    dirty_c0 = 0;
+    dirty_c1 = 0;
+    dirty_n = 0;
+}
+
+static void fb_mark_dirty(unsigned col, unsigned row, unsigned cols, unsigned rows)
+{
+    unsigned r1 = row + rows;
+    unsigned c1 = col + cols;
+
+    if (row >= TERM_ROWS) {
+        return;
+    }
+    if (r1 > TERM_ROWS) {
+        r1 = TERM_ROWS;
+    }
+    if (c1 > TERM_COLS) {
+        c1 = TERM_COLS;
+    }
+    if (dirty_r0 >= dirty_r1) {
+        dirty_r0 = row;
+        dirty_r1 = r1;
+        dirty_c0 = col;
+        dirty_c1 = c1;
+    } else {
+        if (row < dirty_r0) {
+            dirty_r0 = row;
+        }
+        if (r1 > dirty_r1) {
+            dirty_r1 = r1;
+        }
+        if (col < dirty_c0) {
+            dirty_c0 = col;
+        }
+        if (c1 > dirty_c1) {
+            dirty_c1 = c1;
+        }
+    }
+    dirty_n++;
+}
+
+static void fb_flush_dirty(void)
+{
+    unsigned y, y0, y1, bytes;
+    uint64_t xoff;
+
+    if (!fb || dirty_r0 >= dirty_r1 || dirty_c0 >= dirty_c1) {
+        fb_dirty_reset();
+        return;
+    }
+    y0 = term_oy + dirty_r0 * CELL_H;
+    y1 = term_oy + dirty_r1 * CELL_H;
+    xoff = (uint64_t)(term_ox + dirty_c0 * CELL_W) * (fb_bpp / 8u);
+    bytes = (dirty_c1 - dirty_c0) * CELL_W * (fb_bpp / 8u);
+    if (y1 > fb_h) {
+        y1 = fb_h;
+    }
+    for (y = y0; y < y1; y++) {
+        uint64_t a = (fb_pa + (uint64_t)y * fb_pitch + xoff) & ~63ull;
+        uint64_t end = fb_pa + (uint64_t)y * fb_pitch + xoff + bytes;
+        for (; a < end; a += 64ull) {
+            __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
+        }
+    }
+    dsb_sy();
+    fb_dirty_reset();
+}
+
+static void fb_fill_term(uint32_t color)
+{
+    fb_fill_rect(term_ox, term_oy, term_ox + TERM_COLS * CELL_W,
+                 term_oy + TERM_ROWS * CELL_H, color);
+    fb_mark_dirty(0, 0, TERM_COLS, TERM_ROWS);
+}
+
+static uint32_t ansi_rgb(unsigned idx, int bright)
+{
+    static const uint32_t dim[8] = {
+        0x00000000u, 0x00aa0000u, 0x0000aa00u, 0x00aa5500u,
+        0x000000aau, 0x00aa00aau, 0x0000aaaau, 0x00aaaaaau
+    };
+    static const uint32_t lit[8] = {
+        0x00555555u, 0x00ff5555u, 0x0055ff55u, 0x00ffff55u,
+        0x005555ffu, 0x00ff55ffu, 0x0055ffffu, 0x00ffffffu
+    };
+
+    return (bright ? lit : dim)[idx & 7u];
+}
+
+static uint32_t sgr_fg(void)
+{
+    uint32_t fg = ansi_rgb(sgr_fg_i, sgr_bold || sgr_fg_bright);
+    uint32_t bg = ansi_rgb(sgr_bg_i, sgr_bg_bright);
+
+    return sgr_rev ? bg : fg;
+}
+
+static uint32_t sgr_bg(void)
+{
+    uint32_t fg = ansi_rgb(sgr_fg_i, sgr_bold || sgr_fg_bright);
+    uint32_t bg = ansi_rgb(sgr_bg_i, sgr_bg_bright);
+
+    return sgr_rev ? fg : bg;
+}
+
+static void fb_glyph(unsigned col, unsigned row, char ch, uint32_t fg, uint32_t bg)
+{
+    unsigned idx = ((unsigned char)ch < 32 || (unsigned char)ch > 127)
+                       ? 0
+                       : ((unsigned char)ch - 32);
+    unsigned x0 = term_ox + col * CELL_W;
+    unsigned y0 = term_oy + row * CELL_H;
+    unsigned gy, gx, sy;
+
+    if (col >= TERM_COLS || row >= TERM_ROWS) {
+        return;
+    }
+    if (fb_bpp == 16 && x0 + CELL_W <= fb_w && y0 + CELL_H <= fb_h) {
+        uint16_t fg16 = fb_rgb565(fg);
+        uint16_t bg16 = fb_rgb565(bg);
+        uint16_t pix[GLYPH_W];
+
+        for (gy = 0; gy < GLYPH_H; gy++) {
+            uint8_t bits = font8x8[idx][gy];
+            for (gx = 0; gx < GLYPH_W; gx++) {
+                pix[gx] = (bits & (1u << (7u - gx))) ? fg16 : bg16;
+            }
+            for (sy = 0; sy < SCALE_Y; sy++) {
+                volatile uint16_t *p =
+                    (volatile uint16_t *)(fb + (size_t)(y0 + gy * SCALE_Y + sy) *
+                                                   fb_pitch) +
+                    x0;
+                for (gx = 0; gx < GLYPH_W; gx++) {
+                    uint16_t v = pix[gx];
+                    p[gx * SCALE_X] = v;
+                    p[gx * SCALE_X + 1u] = v;
+                }
+            }
+        }
+    } else {
+        unsigned sx;
+        for (gy = 0; gy < GLYPH_H; gy++) {
+            uint8_t bits = font8x8[idx][gy];
+            for (gx = 0; gx < GLYPH_W; gx++) {
+                uint32_t pix = (bits & (1u << (7u - gx))) ? fg : bg;
+                for (sy = 0; sy < SCALE_Y; sy++) {
+                    for (sx = 0; sx < SCALE_X; sx++) {
+                        fb_pixel(x0 + gx * SCALE_X + sx, y0 + gy * SCALE_Y + sy,
+                                 pix);
+                    }
+                }
+            }
+        }
+    }
+    fb_mark_dirty(col, row, 1, 1);
+}
+
+static void fb_puts_at(unsigned col, unsigned row, const char *s, uint32_t color)
+{
+    unsigned cols = fb_cols();
+
+    while (*s && col + 1 < cols) {
+        fb_glyph(col++, row, *s++, color, COL_BG);
+    }
+}
+
+void fb_term_after_mode(void)
+{
+    char line[40];
+    unsigned n = 0;
+    unsigned w = fb_w;
+    unsigned h = fb_h;
+    unsigned x;
+    const char *p = "Veil HDMI  ";
+
+    while (*p && n < sizeof(line) - 1) {
+        line[n++] = *p++;
+    }
+    if (w >= 1000 && n + 4 < sizeof(line)) {
+        line[n++] = (char)('0' + w / 1000);
+        w %= 1000;
+    }
+    if (n + 8 < sizeof(line)) {
+        line[n++] = (char)('0' + (w / 100) % 10);
+        line[n++] = (char)('0' + (w / 10) % 10);
+        line[n++] = (char)('0' + w % 10);
+        line[n++] = 'x';
+        line[n++] = (char)('0' + (h / 100) % 10);
+        line[n++] = (char)('0' + (h / 10) % 10);
+        line[n++] = (char)('0' + h % 10);
+    }
+    line[n] = 0;
+    fb_puts_at(1, 0, line, COL_HD);
+    for (x = term_ox; x < term_ox + TERM_COLS * CELL_W && x < fb_w; x++) {
+        fb_pixel(x, term_oy + CELL_H + 1, COL_HD);
+    }
+    cur_c = 0;
+    cur_r = 2;
+}
+
+static void fb_scroll(void) __attribute__((unused));
+
+static void fb_scroll(void)
+{
+    unsigned row_px = CELL_H;
+    unsigned x0 = term_ox;
+    unsigned x1 = term_ox + TERM_COLS * CELL_W;
+    unsigned y0 = term_oy;
+    unsigned y1 = term_oy + TERM_ROWS * CELL_H;
+    unsigned y, x;
+
+    if (x1 > fb_w) {
+        x1 = fb_w;
+    }
+    if (y1 > fb_h) {
+        y1 = fb_h;
+    }
+    for (y = y0; y + row_px < y1; y++) {
+        for (x = x0; x < x1; x++) {
+            volatile uint8_t *src = fb + (size_t)(y + row_px) * fb_pitch;
+            uint32_t c;
+            if (fb_bpp == 16) {
+                uint16_t v = ((volatile uint16_t *)src)[x];
+                c = ((uint32_t)(v >> 11) << 19) | ((uint32_t)((v >> 5) & 0x3fu) << 10) |
+                    ((uint32_t)(v & 0x1fu) << 3);
+            } else if (fb_bpp == 24) {
+                src += (size_t)x * 3u;
+                c = (uint32_t)src[0] | ((uint32_t)src[1] << 8) | ((uint32_t)src[2] << 16);
+            } else {
+                c = ((volatile uint32_t *)src)[x];
+            }
+            fb_pixel(x, y, c);
+        }
+    }
+    for (y = y1 - row_px; y < y1; y++) {
+        for (x = x0; x < x1; x++) {
+            fb_pixel(x, y, sgr_bg());
+        }
+    }
+}
+
+static void fb_delay_ms(unsigned ms)
+{
+    uint64_t frq = read_cntfrq_el0();
+    uint64_t until;
+
+    if (frq == 0) {
+        frq = 54000000ull;
+    }
+    until = read_cntpct_el0() + (frq / 1000ull) * (uint64_t)ms;
+    while (read_cntpct_el0() < until) {
+    }
+}
+
+static void fb_draw_bars(void)
+{
+    static const uint32_t bars[] = {
+        0x00ffffffu, 0x00ffff00u, 0x0000ffffu, 0x0000ff00u,
+        0x00ff00ffu, 0x00ff0000u, 0x000000ffu, 0x00000000u,
+    };
+    unsigned i, x, y, bw;
+
+    bw = fb_w / 8u;
+    if (bw == 0) {
+        return;
+    }
+    for (y = CELL_H * 3u; y < fb_h; y++) {
+        for (i = 0; i < 8; i++) {
+            unsigned x0 = i * bw;
+            unsigned x1 = (i == 7) ? fb_w : x0 + bw;
+            for (x = x0; x < x1; x++) {
+                fb_pixel(x, y, bars[i]);
+            }
+        }
+    }
+}
+
+void fb_selftest(void)
+{
+    static const unsigned mode_w[] = { 640, 800, 1024 };
+    static const unsigned mode_h[] = { 480, 600, 768 };
+    unsigned i;
+    unsigned keep_w = fb_w;
+    unsigned keep_h = fb_h;
+
+    if (!fb_ready) {
+        return;
+    }
+
+    for (i = 0; i < 3u; i++) {
+        if (fb_set_mode(mode_w[i], mode_h[i]) != 0) {
+            continue;
+        }
+        fb_puts_at(1, 1, "framebuffer selftest", COL_FG);
+        fb_draw_bars();
+        fb_flush();
+        fb_delay_ms(800);
+        keep_w = fb_w;
+        keep_h = fb_h;
+    }
+    (void)fb_set_mode(keep_w, keep_h);
+}
+
+static void fb_clamp(void)
+{
+    unsigned cols = fb_cols();
+    unsigned rows = fb_rows();
+
+    if (cur_c >= cols) {
+        cur_c = cols ? cols - 1 : 0;
+    }
+    if (cur_r >= rows) {
+        cur_r = rows ? rows - 1 : 0;
+    }
+}
+
+static void fb_erase_cols(unsigned row, unsigned c0, unsigned c1)
+{
+    if (row >= TERM_ROWS || c0 >= c1) {
+        return;
+    }
+    if (c1 > TERM_COLS) {
+        c1 = TERM_COLS;
+    }
+    fb_fill_rect(term_ox + c0 * CELL_W, term_oy + row * CELL_H,
+                 term_ox + c1 * CELL_W, term_oy + (row + 1) * CELL_H, sgr_bg());
+    fb_mark_dirty(c0, row, c1 - c0, 1);
+}
+
+static void fb_erase_lines(unsigned r0, unsigned r1)
+{
+    if (r0 >= r1) {
+        return;
+    }
+    if (r1 > TERM_ROWS) {
+        r1 = TERM_ROWS;
+    }
+    fb_fill_rect(term_ox, term_oy + r0 * CELL_H, term_ox + TERM_COLS * CELL_W,
+                 term_oy + r1 * CELL_H, sgr_bg());
+    fb_mark_dirty(0, r0, TERM_COLS, r1 - r0);
+}
+
+static void fb_sgr(void)
+{
+    unsigned i, n, code;
+
+    n = ansi_nargs ? ansi_nargs : 1;
+    for (i = 0; i < n; i++) {
+        code = ansi_nargs ? ansi_arg[i] : 0;
+        if (code == 0) {
+            sgr_fg_i = 7;
+            sgr_bg_i = 0;
+            sgr_fg_bright = 0;
+            sgr_bg_bright = 0;
+            sgr_bold = 0;
+            sgr_rev = 0;
+        } else if (code == 1) {
+            sgr_bold = 1;
+        } else if (code == 7) {
+            sgr_rev = 1;
+        } else if (code == 22) {
+            sgr_bold = 0;
+        } else if (code == 27) {
+            sgr_rev = 0;
+        } else if (code == 39) {
+            sgr_fg_i = 7;
+            sgr_fg_bright = 0;
+        } else if (code == 49) {
+            sgr_bg_i = 0;
+            sgr_bg_bright = 0;
+        } else if (code >= 30 && code <= 37) {
+            sgr_fg_i = code - 30;
+            sgr_fg_bright = 0;
+        } else if (code >= 40 && code <= 47) {
+            sgr_bg_i = code - 40;
+            sgr_bg_bright = 0;
+        } else if (code >= 90 && code <= 97) {
+            sgr_fg_i = code - 90;
+            sgr_fg_bright = 1;
+        } else if (code >= 100 && code <= 107) {
+            sgr_bg_i = code - 100;
+            sgr_bg_bright = 1;
+        }
+    }
+}
+
+static void fb_csi(char final)
+{
+    unsigned a0 = ansi_nargs ? ansi_arg[0] : 0;
+    unsigned a1 = (ansi_nargs > 1) ? ansi_arg[1] : 0;
+    unsigned n = a0 ? a0 : 1;
+
+    switch (final) {
+    case 'H':
+    case 'f':
+        fb_flush_dirty();
+        cur_r = (a0 ? a0 : 1u) - 1u;
+        cur_c = (a1 ? a1 : 1u) - 1u;
+        fb_clamp();
+        break;
+    case 'A':
+        fb_flush_dirty();
+        cur_r = (cur_r > n) ? cur_r - n : 0;
+        break;
+    case 'B':
+        fb_flush_dirty();
+        cur_r += n;
+        fb_clamp();
+        break;
+    case 'C':
+        fb_flush_dirty();
+        cur_c += n;
+        fb_clamp();
+        break;
+    case 'D':
+        fb_flush_dirty();
+        cur_c = (cur_c > n) ? cur_c - n : 0;
+        break;
+    case 'G':
+        fb_flush_dirty();
+        cur_c = (a0 ? a0 : 1u) - 1u;
+        fb_clamp();
+        break;
+    case 'J':
+        if (a0 == 1) {
+            fb_erase_lines(0, cur_r);
+            fb_erase_cols(cur_r, 0, cur_c + 1);
+        } else if (a0 == 2 || a0 == 3) {
+            fb_fill_term(sgr_bg());
+        } else {
+            fb_erase_cols(cur_r, cur_c, TERM_COLS);
+            fb_erase_lines(cur_r + 1, TERM_ROWS);
+        }
+        fb_flush_dirty();
+        break;
+    case 'K':
+        if (a0 == 1) {
+            fb_erase_cols(cur_r, 0, cur_c + 1);
+        } else if (a0 == 2) {
+            fb_erase_cols(cur_r, 0, TERM_COLS);
+        } else {
+            fb_erase_cols(cur_r, cur_c, TERM_COLS);
+        }
+        fb_flush_dirty();
+        break;
+    case 'm':
+        fb_sgr();
+        break;
+    case 's':
+        sav_c = cur_c;
+        sav_r = cur_r;
+        break;
+    case 'u':
+        cur_c = sav_c;
+        cur_r = sav_r;
+        fb_clamp();
+        break;
+    default:
+        break;
+    }
+}
+
+void fb_putc(char c)
+{
+    unsigned char u = (unsigned char)c;
+
+    if (!fb_ready) {
+        return;
+    }
+
+    if (ansi_st == ANSI_ESC) {
+        if (u == '[') {
+            ansi_st = ANSI_CSI;
+            ansi_nargs = 0;
+            ansi_acc = 0;
+            ansi_in_num = 0;
+            memset(ansi_arg, 0, sizeof(ansi_arg));
+            return;
+        }
+        if (u == '7') {
+            sav_c = cur_c;
+            sav_r = cur_r;
+        } else if (u == '8') {
+            cur_c = sav_c;
+            cur_r = sav_r;
+            fb_clamp();
+        }
+        ansi_st = (u == ']') ? ANSI_IGN : ANSI_NORM;
+        return;
+    }
+    if (ansi_st == ANSI_IGN) {
+        if (u == 0x07 || u == '\\') {
+            ansi_st = ANSI_NORM;
+        }
+        return;
+    }
+    if (ansi_st == ANSI_CSI) {
+        if (u >= '0' && u <= '9') {
+            ansi_in_num = 1;
+            ansi_acc = ansi_acc * 10u + (unsigned)(u - '0');
+            return;
+        }
+        if (u == ';' || u == ':') {
+            if (ansi_nargs < 16) {
+                ansi_arg[ansi_nargs++] = ansi_in_num ? ansi_acc : 0;
+            }
+            ansi_acc = 0;
+            ansi_in_num = 0;
+            return;
+        }
+        if (u == '?') {
+            return;
+        }
+        if (ansi_in_num && ansi_nargs < 16) {
+            ansi_arg[ansi_nargs++] = ansi_acc;
+        }
+        ansi_st = ANSI_NORM;
+        if (u >= 0x40) {
+            fb_csi((char)u);
+        }
+        return;
+    }
+
+    if (u == 0x1b) {
+        ansi_st = ANSI_ESC;
+        return;
+    }
+    if (u == '\r') {
+        cur_c = 0;
+        return;
+    }
+    if (u == '\n') {
+        fb_flush_dirty();
+        cur_c = 0;
+        if (cur_r + 1 < fb_rows()) {
+            cur_r++;
+        }
+        return;
+    }
+    if (u == '\t') {
+        cur_c = (cur_c + 4) & ~3u;
+        fb_clamp();
+        return;
+    }
+    if (u == 0x08) {
+        if (cur_c) {
+            cur_c--;
+        }
+        return;
+    }
+    if (u < 32) {
+        return;
+    }
+    if (cur_c >= fb_cols()) {
+        return;
+    }
+    fb_glyph(cur_c, cur_r, (char)u, sgr_fg(), sgr_bg());
+    cur_c++;
+    if (dirty_n >= TERM_COLS) {
+        fb_flush_dirty();
+    }
+}
