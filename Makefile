@@ -57,6 +57,7 @@ VIRT_SRCS := guest/src/init.c \
              guest/src/pflash.c \
              guest/src/fw_cfg.c \
              guest/src/psci.c \
+             guest/src/gic_dist.c \
              guest/src/dtb.c \
              guest/src/smbios.c
 
