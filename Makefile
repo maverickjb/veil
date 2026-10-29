@@ -52,6 +52,7 @@ BOARD_SRCS := board/$(BOARD)/src/board.c \
 VIRT_SRCS := guest/src/init.c \
              guest/src/virtio.c \
              guest/src/machine.c \
+             guest/src/pl031.c \
              guest/src/dtb.c \
              guest/src/smbios.c
 

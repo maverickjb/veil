@@ -37,6 +37,7 @@ uint32_t virtio_pending_intid(void);
 void virtio_ack_irq(uint32_t intid);
 void virt_mmio_init(void);
 int virt_mmio_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
+int pl031_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data);
 void dtb_init(void);
 const uint8_t *dtb_blob(void);
 uint32_t dtb_size(void);
