@@ -937,7 +937,7 @@ static uint32_t icc_bpr0 = 7;
 static uint32_t icc_bpr1 = 7;
 static uint32_t icc_igrpen0;
 static uint32_t icc_igrpen1;
-static uint32_t timer_intid;
+static uint32_t irq_id;
 static uint64_t hooked_vbar;
 static uint64_t hooked_vec_pa;
 static uint64_t hooked_irq_pa;
@@ -948,6 +948,23 @@ static uint32_t irq_vec_words[4];
 static uint64_t icc_patch_va[ICC_PATCH_MAX];
 static uint32_t icc_patch_insn[ICC_PATCH_MAX];
 static unsigned icc_patch_n;
+
+/*
+ * One guest vIRQ:
+ *   source ready (CNTV/UART/…)  → irq_pending(id)  (may set HCR.VI)
+ *   IAR via patched HVC         → irq_in_service(id)  (drops VI)
+ *   EOI                         → irq_idle()          (drops VI)
+ * Poll may latch the next id while the handler still runs; VI stays down
+ * until PSTATE.I=0 and ELR is outside the VBAR IRQ slots. Holding VI with
+ * I=1 freezes this A76 (EL1 stuck on one add after EOI).
+ */
+enum {
+    IRQ_IDLE = 0,
+    IRQ_PENDING,
+    IRQ_IN_SERVICE,
+};
+
+static unsigned irq_st;
 
 static uint32_t pending_intid(void)
 {
@@ -983,10 +1000,94 @@ static uint32_t pending_intid(void)
     return virtio_pending_intid();
 }
 
+static int irq_pin_blocked(void)
+{
+    uint64_t elr = read_elr_el2();
+    int in_irq_vec = hooked_vbar && elr >= hooked_vbar + VEIL_VBAR_IRQ_OFF &&
+                     elr < hooked_vbar + VEIL_VBAR_IRQ_END;
+
+    /* PSTATE.I or still in the VBAR IRQ/FIQ/SError slots: do not assert VI. */
+    return in_irq_vec || (read_spsr_el2() & (1ull << 7)) != 0;
+}
+
+static void irq_apply_pin(void)
+{
+    uint64_t hcr = read_hcr_el2();
+
+#if VEIL_DEBUG
+    {
+        static unsigned trace_n;
+        uint64_t elr = read_elr_el2();
+        uint64_t vbar = read_vbar_el1();
+        if (fb_ramfb_allow_virq() && trace_n < 8u) {
+            uint64_t spsr = read_spsr_el2();
+            uint64_t pa280 = 0;
+            uint32_t i280 = 0;
+
+            if (guest_va_to_pa(vbar + VEIL_VBAR_IRQ_OFF, &pa280) == 0) {
+                i280 = *(volatile uint32_t *)(uintptr_t)pa280;
+            }
+            hyp_printf(
+                "veil: irqtr %u elr=%p I=%u insn=0x%x vbar=%p i280=0x%x igrp1=%u gicr=0x%x id=%u vi=%u cntv=0x%lx elr1=%p sp=%p\n",
+                trace_n, elr, (spsr & (1u << 7)) ? 1u : 0u,
+                guest_fetch_insn(elr), vbar, i280, icc_igrpen1,
+                gicr_isenabler, irq_id, (hcr & HCR_EL2_VI) ? 1u : 0u,
+                (unsigned long)read_cntv_ctl_el0(), read_elr_el1(),
+                read_sp_el1());
+            trace_n++;
+        }
+    }
+#endif
+    /* No vIRQ until the first quiet ramfb store: earlier, AAVMF still
+     * uses DefaultExceptionHandler. Waiting for pixels deadlocks
+     * (SetMode black, WFI, no timer, no logo). */
+    if (irq_pin_blocked()) {
+        write_hcr_el2(hcr & ~HCR_EL2_VI);
+    } else if (irq_st == IRQ_PENDING && irq_id && fb_ramfb_allow_virq()) {
+        static int vi_log;
+        write_hcr_el2(hcr | HCR_EL2_VI);
+        if (!vi_log) {
+            vi_log = 1;
+            hyp_debug("veil: inject vi id=%u cntv=0x%lx cntp=0x%lx\n",
+                      irq_id, (unsigned long)read_cntv_ctl_el0(),
+                      (unsigned long)read_cntp_ctl_el0());
+        }
+    } else {
+        static int no_vi_log;
+        write_hcr_el2(hcr & ~HCR_EL2_VI);
+        if (fb_ramfb_allow_virq() && !irq_id && !no_vi_log) {
+            no_vi_log = 1;
+            hyp_debug("veil: no guest timer cntv=0x%lx cntp=0x%lx\n",
+                      (unsigned long)read_cntv_ctl_el0(),
+                      (unsigned long)read_cntp_ctl_el0());
+        }
+    }
+}
+
+static void irq_pending(uint32_t id)
+{
+    irq_id = id;
+    irq_st = id ? IRQ_PENDING : IRQ_IDLE;
+    irq_apply_pin();
+}
+
+static void irq_in_service(uint32_t id)
+{
+    irq_id = 0;
+    irq_st = IRQ_IN_SERVICE;
+    write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
+    (void)id;
+}
+
+static void irq_idle(void)
+{
+    irq_st = IRQ_IDLE;
+    /* Leave irq_id: poll may already have latched the next INTID. */
+    write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
+}
+
 void veil_timer_poll(void)
 {
-    uint64_t hcr;
-
     guest_vbar_hook();
     pl011_pull_host();
     fb_ramfb_present();
@@ -1010,63 +1111,7 @@ void veil_timer_poll(void)
             }
         }
     }
-    timer_intid = pending_intid();
-    hcr = read_hcr_el2();
-    {
-        uint64_t elr = read_elr_el2();
-        int in_irq_vec = hooked_vbar && elr >= hooked_vbar + VEIL_VBAR_IRQ_OFF &&
-                         elr < hooked_vbar + VEIL_VBAR_IRQ_END;
-
-#if VEIL_DEBUG
-        {
-            static unsigned trace_n;
-            uint64_t vbar = read_vbar_el1();
-            if (fb_ramfb_allow_virq() && trace_n < 8u) {
-                uint64_t spsr = read_spsr_el2();
-                uint64_t pa280 = 0;
-                uint32_t i280 = 0;
-
-                if (guest_va_to_pa(vbar + VEIL_VBAR_IRQ_OFF, &pa280) == 0) {
-                    i280 = *(volatile uint32_t *)(uintptr_t)pa280;
-                }
-                hyp_printf(
-                    "veil: irqtr %u elr=%p I=%u insn=0x%x vbar=%p i280=0x%x igrp1=%u gicr=0x%x id=%u vi=%u cntv=0x%lx elr1=%p sp=%p\n",
-                    trace_n, elr, (spsr & (1u << 7)) ? 1u : 0u,
-                    guest_fetch_insn(elr), vbar, i280, icc_igrpen1,
-                    gicr_isenabler, timer_intid, (hcr & HCR_EL2_VI) ? 1u : 0u,
-                    (unsigned long)read_cntv_ctl_el0(), read_elr_el1(),
-                    read_sp_el1());
-                trace_n++;
-            }
-        }
-#endif
-        /* Do not inject vIRQ before the first quiet ramfb store. Earlier than
-         * that AAVMF still uses DefaultExceptionHandler. Waiting for pixels
-         * deadlocks: SetMode black, WFI, no timer, no logo.
-         * Holding VI while PSTATE.I=1 freezes EL1 on this A76 (handler
-         * stuck on one add after EOI). Drop the pin until ERET unmasks. */
-        if (in_irq_vec || (read_spsr_el2() & (1ull << 7))) {
-            write_hcr_el2(hcr & ~HCR_EL2_VI);
-        } else if (timer_intid && fb_ramfb_allow_virq()) {
-            static int vi_log;
-            write_hcr_el2(hcr | HCR_EL2_VI);
-            if (!vi_log) {
-                vi_log = 1;
-                hyp_debug("veil: inject vi id=%u cntv=0x%lx cntp=0x%lx\n",
-                          timer_intid, (unsigned long)read_cntv_ctl_el0(),
-                          (unsigned long)read_cntp_ctl_el0());
-            }
-        } else {
-            static int no_vi_log;
-            write_hcr_el2(hcr & ~HCR_EL2_VI);
-            if (fb_ramfb_allow_virq() && !timer_intid && !no_vi_log) {
-                no_vi_log = 1;
-                hyp_debug("veil: no guest timer cntv=0x%lx cntp=0x%lx\n",
-                          (unsigned long)read_cntv_ctl_el0(),
-                          (unsigned long)read_cntp_ctl_el0());
-            }
-        }
-    }
+    irq_pending(pending_intid());
     isb();
 }
 
@@ -1088,11 +1133,17 @@ void veil_wfx_idle(struct trapframe *tf)
             break;
         }
     }
-    timer_intid = pending_intid();
+    irq_id = pending_intid();
+    if (irq_id) {
+        irq_st = IRQ_PENDING;
+    } else if (irq_st != IRQ_IN_SERVICE) {
+        irq_st = IRQ_IDLE;
+    }
     if (pl011_rx_n && tf) {
         static int rx_log;
-        gicd_isenabler[1] |= (1u << 1); /* SPI 1 = INTID 33 */
-        timer_intid = VEIL_UART_INTID;
+        gicd_isenabler[1] |= (1u << 1); /* SPI 1 = VEIL_UART_INTID */
+        irq_id = VEIL_UART_INTID;
+        irq_st = IRQ_PENDING;
         tf->spsr &= ~(1ull << 7);
         write_hcr_el2(read_hcr_el2() | HCR_EL2_VI);
         if (!rx_log) {
@@ -1112,8 +1163,15 @@ void veil_timer_poll_tf(struct trapframe *tf)
     if (!tf) {
         return;
     }
-    /* PerformanceLib delay: add x0,x0,x2; add x1,#1; cmp x20,x0; b.hi
-     * with x2=0 never reaches the deadline (seen at 0x7da97460 in IRQ). */
+    /*
+     * AAVMF PerformanceLib NanoSecondDelay, seen at 0x7da97460 in IRQ:
+     *   add x0, x0, x2     // 0x8b020000  step toward deadline in x20
+     *   add x1, x1, #1     // 0x91000421  iteration count
+     *   cmp x20, x0        // 0xeb00029f
+     *   b.hi <loop>        // 0x54….08   taken while x20 > x0
+     * x2 is 0 here, so x0 never reaches x20 and EL1 spins with I=1.
+     * Set x0=x20 so b.hi falls through; leave x1/x2 alone.
+     */
     i0 = guest_fetch_insn(tf->elr);
     i1 = guest_fetch_insn(tf->elr + 4);
     i2 = guest_fetch_insn(tf->elr + 8);
@@ -1132,29 +1190,25 @@ void veil_timer_poll_tf(struct trapframe *tf)
 
 int veil_timer_pending(void)
 {
-    return timer_intid != 0 || pl011_irq;
+    return irq_id != 0 || pl011_irq;
 }
 
 uint32_t icc_ack_irq(void)
 {
-    uint32_t id = timer_intid;
+    uint32_t id = irq_id;
 
     if (!id) {
         id = pending_intid();
     }
-    if (id == VEIL_CNTV_INTID || id == VEIL_CNTP_INTID) {
-        timer_intid = 0;
-        write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
-        return id;
-    }
-    if (id == VEIL_UART_INTID) {
-        timer_intid = 0;
-        write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
+    if (id == VEIL_CNTV_INTID || id == VEIL_CNTP_INTID ||
+        id == VEIL_UART_INTID) {
+        irq_in_service(id);
         return id;
     }
     if (id == 48 || id == 49) {
         virtio_ack_irq(id);
-        timer_intid = 0;
+        irq_id = 0;
+        irq_st = IRQ_IN_SERVICE;
         return id;
     }
     return 1023;
@@ -1162,7 +1216,7 @@ uint32_t icc_ack_irq(void)
 
 void icc_eoi(uint32_t id)
 {
-    write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
+    irq_idle();
     hyp_debug("veil: eoi id=%u cntv=0x%lx\n", id,
               (unsigned long)read_cntv_ctl_el0());
     (void)id;
@@ -1214,7 +1268,7 @@ int icc_emulate(struct trapframe *tf, uint32_t insn)
             } else if (crm == 11 && op2 == 3) {
                 val = 0; /* ICC_RPR_EL1 idle */
             } else if (crm == 12 && op2 == 2) {
-                val = timer_intid ? timer_intid : 1023;
+                val = irq_id ? irq_id : 1023;
             } else {
                 val = 0;
             }
