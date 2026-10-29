@@ -86,9 +86,11 @@ EFI BOOT\BOOTAA64.EFI
 ```
 
 `make run` opens a **GTK window** (QEMU ramfb + virtio-gpu). Press **Esc
-in the terminal** (not the GTK window) during the splash to open the Boot
-Manager. If you wait, BdsDxe boots the embedded virtio-blk ESP and prints
-**Veil test disk**.
+in the terminal** (not the GTK window) during the splash to open the firmware
+setup (TianoCore front page). If you wait, BdsDxe boots the embedded virtio-blk
+ESP and prints **Veil test disk**.
+
+![TianoCore setup](docs/uefi-setup.png)
 
 A blank hard disk is the QEMU recipe, not another ESP baked into Veil:
 
