@@ -51,7 +51,7 @@ BOARD_SRCS := board/$(BOARD)/src/board.c \
 
 VIRT_SRCS := guest/src/init.c \
              guest/src/virtio.c \
-             guest/src/machine.c \
+             guest/src/mmio.c \
              guest/src/pl011.c \
              guest/src/pl031.c \
              guest/src/pflash.c \
