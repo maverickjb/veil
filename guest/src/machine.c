@@ -20,8 +20,6 @@
 #define PL011_RTIM (1u << 6)
 #define PL011_RXIS (1u << 4)
 #define PL011_RTIS (1u << 6)
-#define VEIL_UART_INTID 33u /* GIC SPI 1, virt.dts interrupts = <0 1 4> */
-
 #define GICD_CTLR  0x000
 #define GICD_TYPER 0x004
 #define GICD_IIDR  0x008
@@ -577,10 +575,10 @@ static uint64_t gicr_read(uint64_t off, unsigned size)
         uint64_t pctl = read_cntp_ctl_el0();
         uint32_t pend = 0;
         if ((vctl & 5u) == 5u && !(vctl & 2u)) {
-            pend |= (1u << 27);
+            pend |= (1u << VEIL_CNTV_INTID);
         }
         if ((pctl & 5u) == 5u && !(pctl & 2u)) {
-            pend |= (1u << 30);
+            pend |= (1u << VEIL_CNTP_INTID);
         }
         return pend;
     }
@@ -932,9 +930,6 @@ int virt_mmio_access(uint64_t ipa, int is_write, unsigned size, uint64_t *data)
     return -1;
 }
 
-#define HVC_ICC_IMM 0x5645u
-#define HVC_ICC_INSN (0xD4000002u | (HVC_ICC_IMM << 5))
-
 static uint32_t icc_sre = 0x7; /* SRE | DFB | DIB */
 static uint32_t icc_ctlr;
 static uint32_t icc_pmr = 0xff;
@@ -965,22 +960,22 @@ static uint32_t pending_intid(void)
                   ((vctl & 4u) || read_cntvct_el0() >= read_cntv_cval_el0());
         static int prefer_uart;
 
-        /* Leftover RX bytes must not starve PPI 27: Shell WaitForKey polls
-         * on the timer if SerialDxe never registered INTID 33. */
+        /* Leftover RX must not starve CNTV: Shell WaitForKey polls the
+         * timer if SerialDxe never registered VEIL_UART_INTID. */
         if (uart && tmr) {
             prefer_uart = !prefer_uart;
-            return prefer_uart ? VEIL_UART_INTID : 27u;
+            return prefer_uart ? VEIL_UART_INTID : VEIL_CNTV_INTID;
         }
         if (uart) {
             return VEIL_UART_INTID;
         }
         if (tmr) {
-            return 27;
+            return VEIL_CNTV_INTID;
         }
     }
     if ((pctl & 1u) && !(pctl & 2u) &&
         ((pctl & 4u) || read_cntpct_el0() >= read_cntp_cval_el0())) {
-        return 30;
+        return VEIL_CNTP_INTID;
     }
     if (pl011_irq) {
         return VEIL_UART_INTID;
@@ -1007,7 +1002,7 @@ void veil_timer_poll(void)
                 write_cntv_ctl_el0((vctl | 1ull) & ~2ull);
                 write_cntv_tval_el0(frq / 200ull);
                 isb();
-                gicr_isenabler |= (1u << 27);
+                gicr_isenabler |= (1u << VEIL_CNTV_INTID);
                 unmask_cntv = 1;
                 hyp_debug("veil: cntv kick was=0x%lx now=0x%lx\n",
                           (unsigned long)vctl,
@@ -1019,8 +1014,8 @@ void veil_timer_poll(void)
     hcr = read_hcr_el2();
     {
         uint64_t elr = read_elr_el2();
-        int in_irq_vec = hooked_vbar && elr >= hooked_vbar + 0x280ull &&
-                         elr < hooked_vbar + 0x400ull;
+        int in_irq_vec = hooked_vbar && elr >= hooked_vbar + VEIL_VBAR_IRQ_OFF &&
+                         elr < hooked_vbar + VEIL_VBAR_IRQ_END;
 
 #if VEIL_DEBUG
         {
@@ -1031,7 +1026,7 @@ void veil_timer_poll(void)
                 uint64_t pa280 = 0;
                 uint32_t i280 = 0;
 
-                if (guest_va_to_pa(vbar + 0x280, &pa280) == 0) {
+                if (guest_va_to_pa(vbar + VEIL_VBAR_IRQ_OFF, &pa280) == 0) {
                     i280 = *(volatile uint32_t *)(uintptr_t)pa280;
                 }
                 hyp_printf(
@@ -1147,7 +1142,7 @@ uint32_t icc_ack_irq(void)
     if (!id) {
         id = pending_intid();
     }
-    if (id == 27 || id == 30) {
+    if (id == VEIL_CNTV_INTID || id == VEIL_CNTP_INTID) {
         timer_intid = 0;
         write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
         return id;
@@ -1294,7 +1289,8 @@ static int insn_is_icc(uint32_t insn)
     if ((insn & 0xff800000u) != 0xd5000000u) {
         return 0;
     }
-    /* IAR1 / EOIR1 / HPPIR1 / IAR0 / EOIR0 only — not AP0R0/SRE/BPR. */
+    /* IAR1 / EOIR1 / HPPIR1 / IAR0 / EOIR0 only — not AP0R0/SRE/BPR.
+     * Any Rt. AAVMF 2024.02 CpuDxe uses x0: ICC_IAR1_X0_INSN / ICC_EOIR1_X0_INSN. */
     if (mrs && crm == 12 && op2 == 0) {
         return 1;
     }
@@ -1392,15 +1388,15 @@ void guest_vbar_hook(void)
         return;
     }
     for (i = 0; i < 4u; i++) {
-        irq_vec_words[i] = guest_fetch_insn(vbar + 0x280 + (uint64_t)i * 4u);
+        irq_vec_words[i] = guest_fetch_insn(vbar + VEIL_VBAR_IRQ_OFF + (uint64_t)i * 4u);
     }
-    patch_hvc(vbar + 0x200, &hooked_vec_pa, &saved_vec_insn);
+    patch_hvc(vbar + VEIL_VBAR_SYNC_OFF, &hooked_vec_pa, &saved_vec_insn);
     hooked_irq_pa = 0;
     saved_irq_insn = irq_vec_words[0];
     icc_patch_n = 0;
-    scan_icc(vbar + 0x280, 32);
+    scan_icc(vbar + VEIL_VBAR_IRQ_OFF, 32);
     for (i = 0; i < 32u; i++) {
-        uint64_t va = vbar + 0x280 + (uint64_t)i * 4u;
+        uint64_t va = vbar + VEIL_VBAR_IRQ_OFF + (uint64_t)i * 4u;
         uint32_t insn = guest_fetch_insn(va);
         uint32_t op = insn & 0xfc000000u;
 
@@ -1422,16 +1418,19 @@ void guest_vbar_hook(void)
             }
         }
     }
-    /* IAR/EOI at VBAR+0x5f9fc (0x7dafd1fc) on this AAVMF. */
+    /* AAVMF 2024.02 CpuDxe: IAR/EOI (ICC_IAR1_X0_INSN / ICC_EOIR1_X0_INSN)
+     * at VBAR+AAVMF_CPUDXE_IAR_OFF. Scan from AAVMF_CPUDXE_IAR_SCAN. */
     {
         unsigned k;
-        uint64_t base = vbar + 0x5e000ull;
+        uint64_t base = vbar + AAVMF_CPUDXE_IAR_SCAN;
         hyp_debug("veil: iar probe @%p = 0x%x loop @%p 0x%x 0x%x 0x%x 0x%x\n",
-                  vbar + 0x5f9fcu, guest_fetch_insn(vbar + 0x5f9fcu),
-                  vbar + 0x5f960ull, guest_fetch_insn(vbar + 0x5f960ull),
-                  guest_fetch_insn(vbar + 0x5f964ull),
-                  guest_fetch_insn(vbar + 0x5f968ull),
-                  guest_fetch_insn(vbar + 0x5f96cull));
+                  vbar + AAVMF_CPUDXE_IAR_OFF,
+                  guest_fetch_insn(vbar + AAVMF_CPUDXE_IAR_OFF),
+                  vbar + AAVMF_CPUDXE_IAR_NEAR,
+                  guest_fetch_insn(vbar + AAVMF_CPUDXE_IAR_NEAR),
+                  guest_fetch_insn(vbar + AAVMF_CPUDXE_IAR_NEAR + 4ull),
+                  guest_fetch_insn(vbar + AAVMF_CPUDXE_IAR_NEAR + 8ull),
+                  guest_fetch_insn(vbar + AAVMF_CPUDXE_IAR_NEAR + 12ull));
         for (k = 0; k < 4096u && icc_patch_n < ICC_PATCH_MAX; k++) {
             uint64_t va = base + (uint64_t)k * 4u;
             patch_icc_at(va, guest_fetch_insn(va));
@@ -1471,7 +1470,7 @@ int guest_el1_sync_from_hvc(struct trapframe *tf)
     }
 
     off = hooked_vbar ? tf->elr - hooked_vbar : ~0ull;
-    if (off >= 0x200ull && off < 0x280ull) {
+    if (off >= VEIL_VBAR_SYNC_OFF && off < VEIL_VBAR_IRQ_OFF) {
         if (ec1 == 0) {
             insn = guest_fetch_insn(elr1);
             if (insn && icc_emulate(tf, insn) == 0) {

@@ -135,7 +135,7 @@ void veil_handle_trap(struct trapframe *tf)
         if (guest_el1_sync_from_hvc(tf) == 0) {
             return;
         }
-        if ((esr & 0xffffu) == 0x5645u) {
+        if ((esr & 0xffffu) == HVC_ICC_IMM) {
 #if VEIL_DEBUG
             static unsigned miss;
             if (miss < 4u) {

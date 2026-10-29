@@ -973,7 +973,7 @@ void fb_ramfb_present(void)
         return;
     }
     /* One scan per GOP store burst. Re-walking 1.8 MiB on every CNTHP
-     * left the guest stuck at VBAR+0x280 for hundreds of ms. */
+     * left the guest stuck in the VBAR IRQ slot for hundreds of ms. */
     if (ramfb_irq_ok && ramfb_writes == scanned_wr) {
         return;
     }

@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "gic_cpu.h"
+
 /*
  * Guest-visible IPA map. Not the host SoC.
  * AAVMF (QEMU_EFI.fd) is built for this map.
