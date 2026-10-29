@@ -223,7 +223,7 @@ static void fw_dma_run(void)
 
     if (!dma_log) {
         dma_log = 1;
-        hyp_printf("veil: fw_cfg dma ctrl=0x%x len=%u addr=%p\n", ctrl, len, addr);
+        hyp_debug("veil: fw_cfg dma ctrl=0x%x len=%u addr=%p\n", ctrl, len, addr);
     }
 
     if (ctrl & FW_CFG_DMA_SELECT) {
@@ -250,7 +250,7 @@ static void fw_dma_run(void)
         if (!src) {
             ctrl |= FW_CFG_DMA_ERROR;
         } else if (fw_sel == FW_CFG_FILE_RAMFB) {
-            hyp_printf("veil: ramfb dma write off=%u len=%u\n", fw_off, len);
+            hyp_debug("veil: ramfb dma write off=%u len=%u\n", fw_off, len);
             if (len >= sizeof(ramfb_cfg)) {
                 memcpy(ramfb_cfg, src, sizeof(ramfb_cfg));
                 fw_off = sizeof(ramfb_cfg);
@@ -991,7 +991,6 @@ static uint32_t pending_intid(void)
 void veil_timer_poll(void)
 {
     uint64_t hcr;
-    static unsigned trace_n;
 
     guest_vbar_hook();
     pl011_pull_host();
@@ -1010,9 +1009,9 @@ void veil_timer_poll(void)
                 isb();
                 gicr_isenabler |= (1u << 27);
                 unmask_cntv = 1;
-                hyp_printf("veil: cntv kick was=0x%lx now=0x%lx\n",
-                           (unsigned long)vctl,
-                           (unsigned long)read_cntv_ctl_el0());
+                hyp_debug("veil: cntv kick was=0x%lx now=0x%lx\n",
+                          (unsigned long)vctl,
+                          (unsigned long)read_cntv_ctl_el0());
             }
         }
     }
@@ -1020,27 +1019,32 @@ void veil_timer_poll(void)
     hcr = read_hcr_el2();
     {
         uint64_t elr = read_elr_el2();
-        uint64_t vbar = read_vbar_el1();
         int in_irq_vec = hooked_vbar && elr >= hooked_vbar + 0x280ull &&
                          elr < hooked_vbar + 0x400ull;
 
-        if (fb_ramfb_allow_virq() && trace_n < 8u) {
-            uint64_t spsr = read_spsr_el2();
-            uint64_t pa280 = 0;
-            uint32_t i280 = 0;
+#if VEIL_DEBUG
+        {
+            static unsigned trace_n;
+            uint64_t vbar = read_vbar_el1();
+            if (fb_ramfb_allow_virq() && trace_n < 8u) {
+                uint64_t spsr = read_spsr_el2();
+                uint64_t pa280 = 0;
+                uint32_t i280 = 0;
 
-            if (guest_va_to_pa(vbar + 0x280, &pa280) == 0) {
-                i280 = *(volatile uint32_t *)(uintptr_t)pa280;
+                if (guest_va_to_pa(vbar + 0x280, &pa280) == 0) {
+                    i280 = *(volatile uint32_t *)(uintptr_t)pa280;
+                }
+                hyp_printf(
+                    "veil: irqtr %u elr=%p I=%u insn=0x%x vbar=%p i280=0x%x igrp1=%u gicr=0x%x id=%u vi=%u cntv=0x%lx elr1=%p sp=%p\n",
+                    trace_n, elr, (spsr & (1u << 7)) ? 1u : 0u,
+                    guest_fetch_insn(elr), vbar, i280, icc_igrpen1,
+                    gicr_isenabler, timer_intid, (hcr & HCR_EL2_VI) ? 1u : 0u,
+                    (unsigned long)read_cntv_ctl_el0(), read_elr_el1(),
+                    read_sp_el1());
+                trace_n++;
             }
-            hyp_printf(
-                "veil: irqtr %u elr=%p I=%u insn=0x%x vbar=%p i280=0x%x igrp1=%u gicr=0x%x id=%u vi=%u cntv=0x%lx elr1=%p sp=%p\n",
-                trace_n, elr, (spsr & (1u << 7)) ? 1u : 0u,
-                guest_fetch_insn(elr), vbar, i280, icc_igrpen1,
-                gicr_isenabler, timer_intid, (hcr & HCR_EL2_VI) ? 1u : 0u,
-                (unsigned long)read_cntv_ctl_el0(), read_elr_el1(),
-                read_sp_el1());
-            trace_n++;
         }
+#endif
         /* Do not inject vIRQ before the first quiet ramfb store. Earlier than
          * that AAVMF still uses DefaultExceptionHandler. Waiting for pixels
          * deadlocks: SetMode black, WFI, no timer, no logo.
@@ -1053,18 +1057,18 @@ void veil_timer_poll(void)
             write_hcr_el2(hcr | HCR_EL2_VI);
             if (!vi_log) {
                 vi_log = 1;
-                hyp_printf("veil: inject vi id=%u cntv=0x%lx cntp=0x%lx\n",
-                           timer_intid, (unsigned long)read_cntv_ctl_el0(),
-                           (unsigned long)read_cntp_ctl_el0());
+                hyp_debug("veil: inject vi id=%u cntv=0x%lx cntp=0x%lx\n",
+                          timer_intid, (unsigned long)read_cntv_ctl_el0(),
+                          (unsigned long)read_cntp_ctl_el0());
             }
         } else {
             static int no_vi_log;
             write_hcr_el2(hcr & ~HCR_EL2_VI);
             if (fb_ramfb_allow_virq() && !timer_intid && !no_vi_log) {
                 no_vi_log = 1;
-                hyp_printf("veil: no guest timer cntv=0x%lx cntp=0x%lx\n",
-                           (unsigned long)read_cntv_ctl_el0(),
-                           (unsigned long)read_cntp_ctl_el0());
+                hyp_debug("veil: no guest timer cntv=0x%lx cntp=0x%lx\n",
+                          (unsigned long)read_cntv_ctl_el0(),
+                          (unsigned long)read_cntp_ctl_el0());
             }
         }
     }
@@ -1096,10 +1100,10 @@ void veil_wfx_idle(struct trapframe *tf)
         timer_intid = VEIL_UART_INTID;
         tf->spsr &= ~(1ull << 7);
         write_hcr_el2(read_hcr_el2() | HCR_EL2_VI);
-        if (rx_log < 4) {
+        if (!rx_log) {
+            rx_log = 1;
             hyp_printf("veil: uart rx 0x%x n=%u\n", pl011_rx[pl011_rx_r],
                        pl011_rx_n);
-            rx_log++;
         }
     }
     fb_ramfb_present();
@@ -1123,8 +1127,8 @@ void veil_timer_poll_tf(struct trapframe *tf)
         (i3 & 0xff00001fu) == 0x54000008u && tf->x[2] == 0) {
         static int skip_log;
         if (!skip_log) {
-            hyp_printf("veil: skip zero-step delay elr=%p x0=%p x20=%p\n",
-                       tf->elr, tf->x[0], tf->x[20]);
+            hyp_debug("veil: skip zero-step delay elr=%p x0=%p x20=%p\n",
+                      tf->elr, tf->x[0], tf->x[20]);
             skip_log = 1;
         }
         tf->x[0] = tf->x[20];
@@ -1164,14 +1168,9 @@ uint32_t icc_ack_irq(void)
 void icc_eoi(uint32_t id)
 {
     write_hcr_el2(read_hcr_el2() & ~HCR_EL2_VI);
-    {
-        static int eoi_log;
-        if (eoi_log < 4) {
-            hyp_printf("veil: eoi id=%u cntv=0x%lx\n", id,
-                       (unsigned long)read_cntv_ctl_el0());
-            eoi_log++;
-        }
-    }
+    hyp_debug("veil: eoi id=%u cntv=0x%lx\n", id,
+              (unsigned long)read_cntv_ctl_el0());
+    (void)id;
 }
 
 int icc_emulate(struct trapframe *tf, uint32_t insn)
@@ -1248,16 +1247,10 @@ int icc_emulate(struct trapframe *tf, uint32_t insn)
     if (!handled) {
         return -1;
     }
-    {
-        static unsigned icc_log;
-        if (icc_log < 24u) {
-            hyp_printf("veil: icc %s crm=%u op2=%u val=0x%x elr=%p\n",
-                       is_mrs ? "mrs" : "msr", crm, op2,
-                       is_mrs ? (unsigned)val : (rt != 31 ? (unsigned)tf->x[rt] : 0u),
-                       tf->elr);
-            icc_log++;
-        }
-    }
+    hyp_debug("veil: icc %s crm=%u op2=%u val=0x%x elr=%p\n",
+              is_mrs ? "mrs" : "msr", crm, op2,
+              is_mrs ? (unsigned)val : (rt != 31 ? (unsigned)tf->x[rt] : 0u),
+              tf->elr);
     if (is_mrs && rt != 31) {
         tf->x[rt] = val;
     }
@@ -1352,7 +1345,7 @@ static void patch_icc_at(uint64_t va, uint32_t insn)
     __asm__ volatile("dc cvau, %0" ::"r"(p) : "memory");
     dsb_ish();
     __asm__ volatile("ic ivau, %0" ::"r"(p) : "memory");
-    hyp_printf("veil: icc patch va=%p insn=0x%x\n", va, insn);
+    hyp_debug("veil: icc patch va=%p insn=0x%x\n", va, insn);
     icc_patch_n++;
 }
 
@@ -1414,10 +1407,10 @@ void guest_vbar_hook(void)
         if (op == 0x14000000u || op == 0x94000000u) {
             uint64_t tgt = b_target(va, insn);
             unsigned k;
-            hyp_printf("veil: irq vec %s %p -> %p 0x%x 0x%x 0x%x 0x%x\n",
-                       op == 0x94000000u ? "bl" : "b", va, tgt,
-                       guest_fetch_insn(tgt), guest_fetch_insn(tgt + 4),
-                       guest_fetch_insn(tgt + 8), guest_fetch_insn(tgt + 12));
+            hyp_debug("veil: irq vec %s %p -> %p 0x%x 0x%x 0x%x 0x%x\n",
+                      op == 0x94000000u ? "bl" : "b", va, tgt,
+                      guest_fetch_insn(tgt), guest_fetch_insn(tgt + 4),
+                      guest_fetch_insn(tgt + 8), guest_fetch_insn(tgt + 12));
             scan_icc(tgt, 1024);
             for (k = 0; k < 64u; k++) {
                 uint32_t ins2 = guest_fetch_insn(tgt + (uint64_t)k * 4u);
@@ -1433,12 +1426,12 @@ void guest_vbar_hook(void)
     {
         unsigned k;
         uint64_t base = vbar + 0x5e000ull;
-        hyp_printf("veil: iar probe @%p = 0x%x loop @%p 0x%x 0x%x 0x%x 0x%x\n",
-                   vbar + 0x5f9fcu, guest_fetch_insn(vbar + 0x5f9fcu),
-                   vbar + 0x5f960ull, guest_fetch_insn(vbar + 0x5f960ull),
-                   guest_fetch_insn(vbar + 0x5f964ull),
-                   guest_fetch_insn(vbar + 0x5f968ull),
-                   guest_fetch_insn(vbar + 0x5f96cull));
+        hyp_debug("veil: iar probe @%p = 0x%x loop @%p 0x%x 0x%x 0x%x 0x%x\n",
+                  vbar + 0x5f9fcu, guest_fetch_insn(vbar + 0x5f9fcu),
+                  vbar + 0x5f960ull, guest_fetch_insn(vbar + 0x5f960ull),
+                  guest_fetch_insn(vbar + 0x5f964ull),
+                  guest_fetch_insn(vbar + 0x5f968ull),
+                  guest_fetch_insn(vbar + 0x5f96cull));
         for (k = 0; k < 4096u && icc_patch_n < ICC_PATCH_MAX; k++) {
             uint64_t va = base + (uint64_t)k * 4u;
             patch_icc_at(va, guest_fetch_insn(va));
@@ -1449,9 +1442,9 @@ void guest_vbar_hook(void)
     isb();
     if (hooked_vec_pa) {
         hooked_vbar = vbar;
-        hyp_printf("veil: vbar hook %p irq0=0x%x 0x%x 0x%x 0x%x npatch=%u\n", vbar,
-                   irq_vec_words[0], irq_vec_words[1], irq_vec_words[2],
-                   irq_vec_words[3], icc_patch_n);
+        hyp_debug("veil: vbar hook %p irq0=0x%x 0x%x 0x%x 0x%x npatch=%u\n", vbar,
+                  irq_vec_words[0], irq_vec_words[1], irq_vec_words[2],
+                  irq_vec_words[3], icc_patch_n);
     }
 }
 
@@ -1487,8 +1480,8 @@ int guest_el1_sync_from_hvc(struct trapframe *tf)
                 return 0;
             }
         }
-        hyp_printf("veil: el1 sync via hook esr=0x%lx elr1=%p insn=0x%x hvc=%p\n",
-                   (unsigned long)esr1, elr1, insn, tf->elr);
+        hyp_debug("veil: el1 sync via hook esr=0x%lx elr1=%p insn=0x%x hvc=%p\n",
+                  (unsigned long)esr1, elr1, insn, tf->elr);
         return -1;
     }
 

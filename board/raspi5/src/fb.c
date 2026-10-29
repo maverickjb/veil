@@ -944,7 +944,7 @@ void fb_ramfb_note_write(void)
     if (ramfb_writes == 1u || ramfb_writes == 8u || ramfb_writes == 64u ||
         ramfb_writes == 256u || ramfb_writes == 480u ||
         (ramfb_writes % 512u) == 0u) {
-        hyp_printf("veil: ramfb wr n=%u\n", ramfb_writes);
+        hyp_debug("veil: ramfb wr n=%u\n", ramfb_writes);
     }
 }
 
@@ -953,7 +953,6 @@ void fb_ramfb_present(void)
     unsigned dw, dh, ox, oy, y, x;
     uint64_t now, frq;
     int painted = 0;
-    static int skip_log;
     static int blit_log;
     static unsigned scanned_wr;
 
@@ -1003,7 +1002,9 @@ void fb_ramfb_present(void)
             }
         }
     }
+#if VEIL_DEBUG
     {
+        static int skip_log;
         const volatile uint8_t *base =
             (const volatile uint8_t *)(uintptr_t)ramfb_pa;
         uint32_t tl = ramfb_src32(base, 0);
@@ -1020,13 +1021,14 @@ void fb_ramfb_present(void)
             skip_log++;
         }
     }
+#endif
     /* SetMode fills black then WFI. Withholding vIRQ until pixels exist
      * deadlocks BDS/logo: firmware never paints, HDMI keeps the splash. */
     scanned_wr = ramfb_writes;
     if (!ramfb_irq_ok) {
         ramfb_irq_ok = 1;
-        hyp_printf("veil: ramfb virq wr=%u painted=%u\n", ramfb_writes,
-                   painted);
+        hyp_debug("veil: ramfb virq wr=%u painted=%u\n", ramfb_writes,
+                  painted);
     }
     if (!painted) {
         s2_ramfb_ro();

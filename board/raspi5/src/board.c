@@ -143,7 +143,6 @@ void board_ack_host_irq(void)
     uint32_t iar = gicc[GICC_IAR / 4];
     uint32_t id = iar & 0x3ffu;
     int grp1 = 0;
-    static unsigned irq_n;
 
     if (id >= 1020u) {
         iar = gicc[GICC_AIAR / 4];
@@ -158,11 +157,16 @@ void board_ack_host_irq(void)
         }
     }
     cnthp_rearm();
-    if (irq_n < 3u) {
-        hyp_printf("veil: host irq %u id=%u grp1=%d ctl=0x%lx\n", irq_n, id,
-                   grp1, (unsigned long)read_cnthp_ctl_el2());
+#if VEIL_DEBUG
+    {
+        static unsigned irq_n;
+        if (irq_n < 3u) {
+            hyp_printf("veil: host irq %u id=%u grp1=%d ctl=0x%lx\n", irq_n, id,
+                       grp1, (unsigned long)read_cnthp_ctl_el2());
+        }
+        irq_n++;
     }
-    irq_n++;
+#endif
 }
 
 void uart_putc(char c)

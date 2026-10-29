@@ -21,6 +21,17 @@ size_t strlen(const char *s);
 int memcmp(const void *a, const void *b, size_t n);
 void hyp_printf(const char *fmt, ...);
 
+/* Verbose EL2 logs on the debug UART (same line as guest ConIn).
+ * Build with: make VEIL_DEBUG=1 */
+#ifndef VEIL_DEBUG
+#define VEIL_DEBUG 0
+#endif
+#if VEIL_DEBUG
+#define hyp_debug(...) hyp_printf(__VA_ARGS__)
+#else
+#define hyp_debug(...) do { } while (0)
+#endif
+
 /* mmu.c */
 void s2_init(void);
 int s2_ipa_to_pa(uint64_t ipa, uint64_t *pa, size_t *remain);

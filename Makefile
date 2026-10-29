@@ -27,6 +27,12 @@ CPPFLAGS += -DGUEST_AAVMF
 GUEST_OBJ := $(BUILD)/efi_blob.o $(BUILD)/disk_blob.o
 endif
 
+# Hot-path UART logs off by default (shares ConIn). make VEIL_DEBUG=1 to restore.
+VEIL_DEBUG ?= 0
+ifeq ($(VEIL_DEBUG),1)
+CPPFLAGS += -DVEIL_DEBUG=1
+endif
+
 CFLAGS := -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
           -mgeneral-regs-only -mstrict-align -nostdlib -nostartfiles \
           -std=c11 -Wall -Wextra -Werror -O2 -g \

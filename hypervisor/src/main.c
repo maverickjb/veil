@@ -123,6 +123,7 @@ void veil_handle_trap(struct trapframe *tf)
     }
 
     if (ec == ESR_EC_HVC64) {
+#if VEIL_DEBUG
         static unsigned hvc_log;
 
         if (hvc_log < 16u) {
@@ -130,15 +131,18 @@ void veil_handle_trap(struct trapframe *tf)
                        (unsigned long)esr, tf->elr, tf->x[0]);
             hvc_log++;
         }
+#endif
         if (guest_el1_sync_from_hvc(tf) == 0) {
             return;
         }
         if ((esr & 0xffffu) == 0x5645u) {
+#if VEIL_DEBUG
             static unsigned miss;
             if (miss < 4u) {
                 hyp_printf("veil: unmatched icc hvc elr=%p skip\n", tf->elr);
                 miss++;
             }
+#endif
             /* ELR is already the insn after HVC. */
             return;
         }
@@ -182,8 +186,8 @@ void veil_handle_trap(struct trapframe *tf)
 
             if (!ramfb_fault_log) {
                 ramfb_fault_log = 1;
-                hyp_printf("veil: ramfb s2 write hpfar=%p far=%p esr=0x%x\n",
-                           ipa, far, iss);
+                hyp_debug("veil: ramfb s2 write hpfar=%p far=%p esr=0x%x\n",
+                          ipa, far, iss);
             }
             fb_ramfb_note_write();
             return;
@@ -208,9 +212,9 @@ void veil_handle_trap(struct trapframe *tf)
         static int mmio_log;
         if (!mmio_log) {
             mmio_log = 1;
-            hyp_printf("veil: guest mmio %s ipa=%p sz=%u elr=%p isv=%u\n",
-                       is_write ? "w" : "r", far, size, tf->elr,
-                       (iss & ESR_ISS_ISV) ? 1u : 0u);
+            hyp_debug("veil: guest mmio %s ipa=%p sz=%u elr=%p isv=%u\n",
+                      is_write ? "w" : "r", far, size, tf->elr,
+                      (iss & ESR_ISS_ISV) ? 1u : 0u);
         }
     }
 
